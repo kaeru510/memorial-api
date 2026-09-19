@@ -42,9 +42,21 @@
       object-fit: cover;
       transition: opacity 0.3s ease;
     }
-    #idleVideo { z-index: 1; opacity: 1; }
+    #idleVideo { z-index: 1; opacity: 1; transform-origin: center bottom; }
     #talkVideo { z-index: 2; opacity: 0; pointer-events: none; }
     #talkVideo.active { opacity: 1; pointer-events: auto; }
+
+    /* 首をコクッとうなずく自然なヘッドジェスチャー */
+    @keyframes headNod {
+      0% { transform: translateY(0) scale(1); }
+      30% { transform: translateY(8px) scale(1.01); }
+      70% { transform: translateY(-2px) scale(0.998); }
+      100% { transform: translateY(0) scale(1); }
+    }
+    .nodding {
+      animation: headNod 0.7s cubic-bezier(0.25, 1, 0.5, 1);
+    }
+
 
     .status-badge {
       position: absolute;
@@ -312,6 +324,30 @@
     setControlsDisabled(false);
   });
 
+  // 即時相槌（うなずき ＆ 音声）の設定
+
+  const nodAudios = [
+    new Audio("/static/nod_1.wav"),
+    new Audio("/static/nod_2.wav"),
+    new Audio("/static/nod_3.wav")
+  ];
+  let currentNodAudio = null;
+
+  function playImmediateNod() {
+    // 1. 首をコクッとうなずくモーション（0msで即時発動）
+    idleVideo.classList.remove("nodding");
+    void idleVideo.offsetWidth; // リフロー強制
+    idleVideo.classList.add("nodding");
+
+    // 2. ランダム相槌音声を即座に再生
+    try {
+      const idx = Math.floor(Math.random() * nodAudios.length);
+      currentNodAudio = nodAudios[idx];
+      currentNodAudio.currentTime = 0;
+      currentNodAudio.play().catch(() => {});
+    } catch (e) {}
+  }
+
   function setControlsDisabled(disabled) {
     sendBtn.disabled = disabled;
     micBtn.disabled = disabled;
@@ -332,6 +368,9 @@
     statusDot.className = "status-dot thinking";
     statusText.innerText = "考え中...";
 
+    // ★【実験 1】話し終えた瞬間に 0秒で「コクッとうなずいて相槌」を打つ
+    playImmediateNod();
+
     try {
       const response = await fetch("/chat", {
         method: "POST",
@@ -350,6 +389,14 @@
       const blob = await response.blob();
       const videoUrl = URL.createObjectURL(blob);
 
+      // 相槌音声が再生中なら、発話が被らないよう自然に終了を少し待つ
+      if (currentNodAudio && !currentNodAudio.paused) {
+        await new Promise(resolve => {
+          currentNodAudio.onended = resolve;
+          setTimeout(resolve, 600);
+        });
+      }
+
       talkVideo.src = videoUrl;
       await talkVideo.play();
 
@@ -357,6 +404,7 @@
       subtitle.innerText = `AI: ${replyText}`;
       statusDot.className = "status-dot talking";
       statusText.innerText = "お話し中";
+
 
     } catch (err) {
       console.error(err);

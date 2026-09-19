@@ -1,11 +1,21 @@
 import os
+import sys
 import requests
+
+if sys.platform == "win32":
+    try:
+        sys.stdout.reconfigure(encoding="utf-8")
+        sys.stderr.reconfigure(encoding="utf-8")
+    except Exception:
+        pass
 
 AIVIS_URL = "http://127.0.0.1:10101"
 SPEAKER_ID = 888753760
-STATIC_DIR = r"C:\Users\yamada\OneDrive - Shizuoka University\myfolder\memorial-api\static"
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+STATIC_DIR = os.path.join(BASE_DIR, "static")
 
 os.makedirs(STATIC_DIR, exist_ok=True)
+
 
 phrases = {
     "nod_1.wav": "うん！",
