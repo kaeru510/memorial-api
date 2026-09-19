@@ -220,38 +220,18 @@ def chat_and_generate_video(req: ChatRequest):
         traceback.print_exc()
         raise HTTPException(status_code=500, detail=f"音声合成エラー: {e}")
 
-    # 3. Colab GPU による動画生成
-    t0 = time.time()
-    try:
-        print("🚀 Colab で口パク動画を合成中...")
-        client = get_gradio_client()  # 安全にクライアントを取得
-        result_video_path = client.predict(
-            face_img_path=handle_file(FACE_IMG_PATH),
-            audio_path=handle_file(OUTPUT_AUDIO_PATH),
-            api_name="/process_pipeline"
-        )
-        shutil.copy(result_video_path, FINAL_VIDEO_PATH)
-        print(f"🎬 [3. 動画合成+転送] ({time.time() - t0:.2f}秒)")
-    except HTTPException:
-        raise
-    except Exception as e:
-        traceback.print_exc()
-        # 接続が切れていた場合に次回再接続できるようリセット
-        global gradio_client
-        gradio_client = None
-        raise HTTPException(status_code=500, detail=f"動画生成エラー: {e}")
-
     print("-" * 50)
-    print(f"🏁 【全体の合計待ち時間】: {time.time() - total_start:.2f}秒")
+    print(f"🏁 【バックエンド合計待ち時間】: {time.time() - total_start:.2f}秒 (超高速即レスモード)")
     print("=" * 50 + "\n")
 
     encoded_reply = urllib.parse.quote(reply_text)
     return FileResponse(
-        FINAL_VIDEO_PATH,
-        media_type="video/mp4",
-        filename="final_output.mp4",
+        OUTPUT_AUDIO_PATH,
+        media_type="audio/wav",
+        filename="output.wav",
         headers={"X-Reply-Text": encoded_reply, "Access-Control-Expose-Headers": "X-Reply-Text"}
     )
+
 
 
 # ====================================================
