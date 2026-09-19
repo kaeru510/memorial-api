@@ -28,7 +28,7 @@ ADMIN_PASSWORD = "a"
 GEMINI_API_KEY = "AQ.Ab8RN6LbxmRb_omIfiTr1Np-m-8euT6-lxyqiWnmHQg4MnA12g"
 
 # 3. Colab 実行時に発行された gradio.live の URL
-COLAB_GRADIO_URL = "https://509c9cab460d813a20.gradio.live"
+COLAB_GRADIO_URL = "https://e8535d860d194b0ee0.gradio.live"
 
 # AivisSpeech 設定
 AIVIS_URL = "http://127.0.0.1:10101"
