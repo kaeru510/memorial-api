@@ -48,12 +48,15 @@ if not os.path.exists(os.path.join(LIVEPORTRAIT_DIR, "inference.py")):
 # LivePortrait の依存パッケージ確認
 try:
     import tyro
+    import onnx
     import onnxruntime
+    import pykalman
+    import lmdb
 except ImportError:
-    print("📥 LivePortrait 依存ライブラリ (onnxruntime, tyro, pykalman 等) をインストール中...")
+    print("📥 LivePortrait 依存ライブラリ (onnx, onnxruntime, tyro, pykalman 等) をインストール中...")
     subprocess.run([
         "pip", "install",
-        "onnxruntime-gpu", "onnxruntime", "tyro", "pykalman", "pyyaml",
+        "onnx", "onnxruntime-gpu", "onnxruntime", "tyro", "pykalman", "pyyaml",
         "albumentations", "lmdb", "ffmpeg-python", "transformers", "-q"
     ], check=False)
 
