@@ -418,4 +418,31 @@ with gr.Blocks() as demo:
             api_name="setup_avatar"
         )
 
+# ==============================================================================
+# 7. URL自動クラウド同期（ローカルPCと完全自動接続）
+# ==============================================================================
+import threading
+import requests
+
+def sync_url_worker():
+    sync_endpoint = "https://api.cl1p.net/kaeru510-memorial"
+    print("📡 URL自動同期ワーカー開始...")
+    for _ in range(40):  # 最大80秒待機
+        time.sleep(2)
+        url = getattr(demo, "share_url", None)
+        if url:
+            try:
+                requests.post(sync_endpoint, data=url.strip(), timeout=5)
+                print("\n" + "=" * 60)
+                print(f"📡 【URL自動同期完了】最新URLをクラウドに送信しました！")
+                print(f"👉 URL: {url}")
+                print(f"（ローカルPC側で自動検出されるため、コピペ不要です）")
+                print("=" * 60 + "\n")
+                break
+            except Exception as e:
+                print(f"⚠️ URL同期リトライ中: {e}")
+
+threading.Thread(target=sync_url_worker, daemon=True).start()
+
 demo.launch(share=True, debug=True, allowed_paths=["/content"])
+

@@ -86,24 +86,53 @@ try:
 except Exception as e:
     print("⚠️ ウォームアップスキップ:", e)
 
-# ====================================================
-# 2. Colab Gradio クライアント（安全な遅延接続方式）
-# ====================================================
-gradio_client = None
+SYNC_ENDPOINT = "https://api.cl1p.net/kaeru510-memorial"
+
+def fetch_latest_colab_url():
+    """クラウド同期エンドポイントから最新のColab URLを取得"""
+    global COLAB_GRADIO_URL, gradio_client
+    try:
+        res = requests.get(SYNC_ENDPOINT, timeout=3)
+        if res.ok:
+            remote_url = res.text.strip()
+            if remote_url.startswith("http") and ("gradio.live" in remote_url or "ngrok" in remote_url):
+                if remote_url != COLAB_GRADIO_URL:
+                    print(f"🔄 最新のColab URLを自動同期しました: {remote_url}")
+                    COLAB_GRADIO_URL = remote_url
+                    gradio_client = None  # 再接続を促す
+                return remote_url
+    except Exception as e:
+        print(f"⚠️ URL自動取得スキップ: {e}")
+    return COLAB_GRADIO_URL
 
 def get_gradio_client():
-    """リクエスト時に接続を試みる（Colabが未起動でもサーバー起動が落ちないようにする）"""
-    global gradio_client
+    """リクエスト時に接続を試みる（最新URLを自動取得し、失敗時は再取得）"""
+    global gradio_client, COLAB_GRADIO_URL
+
+    # まず最新URLを同期
+    fetch_latest_colab_url()
+
     if gradio_client is None:
         print(f"🌐 Colab サーバーへ接続中: {COLAB_GRADIO_URL}")
         try:
             gradio_client = Client(COLAB_GRADIO_URL)
             print("✅ Colab 接続完了！")
         except Exception as e:
-            print(f"❌ Colab 接続失敗: {e}")
+            # 接続失敗時、もう一度最新URLの同期を試みる
+            print(f"⚠️ 接続失敗、最新URLを再チェック中...: {e}")
+            latest_url = fetch_latest_colab_url()
+            if latest_url and latest_url != COLAB_GRADIO_URL:
+                try:
+                    COLAB_GRADIO_URL = latest_url
+                    gradio_client = Client(COLAB_GRADIO_URL)
+                    print("✅ 再取得URLでのColab接続完了！")
+                    return gradio_client
+                except Exception:
+                    pass
+            print(f"❌ Colab 接続失敗: {COLAB_GRADIO_URL}")
             raise HTTPException(
                 status_code=503,
-                detail="Colabサーバーに接続できませんでした。Colabセルが実行中か、URLが最新か確認してください。"
+                detail=f"Colabサーバー（{COLAB_GRADIO_URL}）に接続できませんでした。Colabセルが実行中か確認してください。"
             )
     return gradio_client
 
@@ -267,4 +296,29 @@ async def upload_avatar(file: UploadFile = File(...)):
         traceback.print_exc()
         global gradio_client
         gradio_client = None
-        raise HTTPException(status_code=500, detail=f"アバター生成エラー: {e}")
+        raise HTTPException(status_code=500, detail=f"アバター生成エラー: {e}")
+
+
+# ====================================================
+# Colab URL 取得・手動設定エンドポイント
+# ====================================================
+class SetUrlRequest(BaseModel):
+    url: str
+
+@app.get("/api/colab_url")
+def get_colab_url():
+    current_url = fetch_latest_colab_url()
+    return {"url": current_url}
+
+@app.post("/api/colab_url")
+def set_colab_url(req: SetUrlRequest):
+    global COLAB_GRADIO_URL, gradio_client
+    new_url = req.url.strip()
+    COLAB_GRADIO_URL = new_url
+    gradio_client = None
+    try:
+        requests.post(SYNC_ENDPOINT, data=new_url, timeout=3)
+    except Exception:
+        pass
+    return {"status": "success", "url": COLAB_GRADIO_URL}
+

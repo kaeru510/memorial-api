@@ -91,6 +91,24 @@
       border-color: #2979ff;
     }
 
+    .colab-status-row {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      padding: 0 4px;
+      font-size: 11px;
+      color: #888;
+    }
+    .colab-edit-btn {
+      background: transparent;
+      border: none;
+      color: #888;
+      cursor: pointer;
+      font-size: 11px;
+      padding: 2px 6px;
+      border-radius: 4px;
+    }
+    .colab-edit-btn:hover { color: #fff; background: #333; }
 
     .control-panel {
       padding: 20px;
@@ -197,6 +215,11 @@
       <button id="micBtn" class="icon-btn mic-btn" title="マイクで話す" onclick="toggleRecognition()">🎤</button>
       <textarea id="textInput" placeholder="メッセージを入力またはマイクで発話..."></textarea>
       <button id="sendBtn" class="send-btn" onclick="sendMessage()">送信</button>
+    </div>
+
+    <div class="colab-status-row">
+      <span id="colabStatusText">🌐 Colab: 接続確認中...</span>
+      <button class="colab-edit-btn" onclick="editColabUrl()" title="Colab URLを手動で変更">✏️ URL変更</button>
     </div>
   </div>
 </div>
@@ -391,6 +414,39 @@
     } finally {
       setControlsDisabled(false);
       input.value = "";
+    }
+  }
+
+  // Colab URL の自動監視と手動変更
+  async function checkColabUrl() {
+    try {
+      const res = await fetch("/api/colab_url");
+      if (res.ok) {
+        const data = await res.json();
+        const displayUrl = data.url ? data.url.replace(/^https?:\/\//, "") : "未接続";
+        document.getElementById("colabStatusText").innerText = `🌐 Colab: ${displayUrl.length > 25 ? displayUrl.slice(0, 22) + "..." : displayUrl}`;
+      }
+    } catch (e) {}
+  }
+  setInterval(checkColabUrl, 10000);
+  checkColabUrl();
+
+  async function editColabUrl() {
+    const current = prompt("ColabのGradio URLを入力してください（通常は自動同期されるため空欄でもOKです）：");
+    if (current && current.trim()) {
+      try {
+        const res = await fetch("/api/colab_url", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ url: current.trim() })
+        });
+        if (res.ok) {
+          checkColabUrl();
+          alert("Colab URLを手動更新しました！");
+        }
+      } catch (e) {
+        alert("URL更新に失敗しました: " + e.message);
+      }
     }
   }
 </script>
