@@ -45,6 +45,14 @@ if not os.path.exists(os.path.join(LIVEPORTRAIT_DIR, "inference.py")):
     print("📥 LivePortrait をクローン中...")
     subprocess.run(["git", "clone", "https://github.com/KwaiVGI/LivePortrait.git", LIVEPORTRAIT_DIR], check=True)
 
+# LivePortrait の依存パッケージ確認
+try:
+    import tyro
+except ImportError:
+    print("📥 LivePortrait 依存ライブラリ (tyro, pykalman 等) をインストール中...")
+    subprocess.run(["pip", "install", "tyro", "pykalman", "pyyaml", "albumentations", "lmdb", "ffmpeg-python", "-q"], check=True)
+
+
 if not os.path.exists(os.path.join(LIVEPORTRAIT_DIR, "pretrained_weights")):
     print("📥 LivePortrait の重みファイルをダウンロード中...")
     try:
