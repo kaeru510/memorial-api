@@ -86,16 +86,17 @@ if not os.path.exists(target_weight):
             print(f"❌ LivePortrait 重み取得エラー: {e}")
 
 
-# (3) モーション動画 (idle.mp4) の準備
-if not os.path.exists(IDLE_VIDEO_PATH):
+# (3) 表情豊かなリッチモーション動画 (d0.mp4: 微笑み＆頷き) の準備
+lp_default_d0 = f"{LIVEPORTRAIT_DIR}/assets/examples/driving/d0.mp4"
+if os.path.exists(lp_default_d0):
+    shutil.copy(lp_default_d0, IDLE_VIDEO_PATH)
+    print("✅ LivePortrait 表情豊かなリッチモーション (d0.mp4) を設定しました")
+elif not os.path.exists(IDLE_VIDEO_PATH):
     drive_idle = f"{DRIVE_DIR}/idle.mp4"
-    lp_default_d0 = f"{LIVEPORTRAIT_DIR}/assets/examples/driving/d0.mp4"
     if os.path.exists(drive_idle):
         shutil.copy(drive_idle, IDLE_VIDEO_PATH)
         print("✅ Drive から idle.mp4 を配置しました")
-    elif os.path.exists(lp_default_d0):
-        shutil.copy(lp_default_d0, IDLE_VIDEO_PATH)
-        print("✅ LivePortrait サンプルから idle.mp4 を初期配置しました")
+
 
 # (4) Drive からの初期ファイル復元（存在すれば利用）
 os.makedirs(f"{WAV2LIP_DIR}/checkpoints", exist_ok=True)
@@ -249,8 +250,11 @@ def setup_avatar(face_img_path):
             "-s", face_img_path,
             "-d", active_driving_video,
             "--flag_relative_motion",
-            "--flag_do_crop"
+            "--flag_do_crop",
+            "--driving_option", "expression-friendly",
+            "--flag_eye_retargeting"
         ]
+
         if device == 'cpu':
             lp_cmd.append("--flag_force_cpu")
             print("⚠️ CPUモードのため LivePortrait に --flag_force_cpu を適用します", flush=True)
