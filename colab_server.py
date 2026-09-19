@@ -222,6 +222,10 @@ def setup_avatar(face_img_path):
             "--flag_relative_motion",
             "--flag_do_crop"
         ]
+        if device == 'cpu':
+            lp_cmd.append("--flag_force_cpu")
+            print("⚠️ CPUモードのため LivePortrait に --flag_force_cpu を適用します")
+
         res = subprocess.run(lp_cmd, cwd=LIVEPORTRAIT_DIR, capture_output=True, text=True)
         if res.returncode != 0:
             print("❌ LivePortrait 実行エラー:")
