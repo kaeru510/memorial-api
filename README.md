@@ -64,36 +64,67 @@ C:\dev\memorial-api\
 
 ---
 
-## 4. 起動手順
+## 4. 起動手順（1から動かす完全ガイド）
 
-### ① ローカルの音声合成エンジン（AivisSpeech）を起動
-```powershell
-& "C:\dev\memorial-api\AivisSpeech-Engine-Windows-x64-1.2.0\Windows-x64\run.exe" --host 127.0.0.1 --port 10101
-```
+本システムは **「ローカルPC（音声＆Webサーバー）」** と **「Google Colab（動画生成）」** の2つを起動することで対話可能になります。
 
-### ② ローカルの FastAPI サーバーを起動
-```powershell
-$env:PYTHONUTF8="1"
-& "C:\Users\yamada\anaconda3\envs\grave\python.exe" -m uvicorn main:app --host 127.0.0.1 --port 8000 --reload
-```
+---
 
-### ③ Google Colab サーバーを起動
-Google Colab ノートブック上で、以下の2つのセルを実行します：
+### ステップ 1: ローカルサーバーを起動する（3つの方法から選べます）
 
-**【セル1】Google Drive マウント（キャッシュ・モデル保持用）**
+#### 【方法 A】AI アシスタントにお願いする（一番簡単）
+チャットで **「ローカルサーバーを起動して」** と指示するだけで、AivisSpeech と FastAPI の両方がバックグラウンドで自動起動します。
+
+#### 【方法 B】ワンクリック起動（バッチファイル）
+プロジェクトフォルダ内の **`start_local.bat`** をダブルクリックするだけで、必要な2つのサーバーが一括で起動します。
+
+#### 【方法 C】手動コマンド起動（PowerShell）
+別々の PowerShell ウィンドウを開き、以下を実行します：
+1. **AivisSpeech 音声エンジン起動**:
+   ```powershell
+   & "C:\dev\memorial-api\AivisSpeech-Engine-Windows-x64-1.2.0\Windows-x64\run.exe" --host 127.0.0.1 --port 10101
+   ```
+2. **FastAPI メインサーバー起動**:
+   ```powershell
+   $env:PYTHONUTF8="1"
+   & "C:\Users\yamada\anaconda3\envs\grave\python.exe" -m uvicorn main:app --host 127.0.0.1 --port 8000 --reload
+   ```
+
+---
+
+### ステップ 2: Google Colab サーバーを起動する（動画生成）
+
+1. ブラウザで Google Colab ノートブックを開きます。
+2. **ランタイムのタイプを選択**:
+   * **検証・テスト時（無料枠を温存したい場合）**: **CPU**（ハードウェアアクセラレータ「なし」）でOKです。軽量化により約2〜3分で起動します。
+   * **本格対話時（超高速1〜2秒応答にしたい場合）**: **T4 GPU**（メニュー「ランタイム」➔「ランタイムのタイプを変更」➔「T4 GPU」）を選択します。
+3. ノートブック上で以下の2つのセルを実行します：
+
+**【セル 1】Google Drive マウント（キャッシュ・モデル保持用）**
 ```python
 from google.colab import drive
 drive.mount('/content/drive')
 ```
 
-**【セル2】高速サーバー起動（GitHubから最新コードを自動同期）**
+**【セル 2】サーバー起動（GitHubから最新コードを自動同期）**
 ```python
 !git clone https://github.com/kaeru510/memorial-api.git /content/memorial-api 2>/dev/null || (cd /content/memorial-api && git pull)
 !python /content/memorial-api/colab_server.py
 ```
-> [!IMPORTANT]
-> **Colab のハードウェア設定は「T4 GPU」を推奨します**（メニューの「ランタイム」→「ランタイムのタイプを変更」→「T4 GPU」）。  
-> GPU有効時は動画生成が **約1〜2秒** で完了します。
+> [!NOTE]
+> Colab 起動時に発行される `gradio.live` の URL は、クラウド同期（`cl1p.net`）経由でローカルPCへ**完全自動通知**されるため、URLのコピペ作業は一切不要です。
+
+---
+
+### ステップ 3: ブラウザでアクセスして対話開始
+
+1. ブラウザで **[http://localhost:8000](http://localhost:8000)** にアクセスします。
+2. Basic認証ダイアログが表示されたら入力します：
+   * **ユーザー名**: `a`
+   * **パスワード**: `a`
+3. マイクボタンを押して音声で話しかけるか、画面下のテキストボックスからメッセージを入力すると、アバターが音声に合わせて滑らかに口パク対話します。
+4. アバターを変更したい場合は、右上の **「📷 写真を変更」** から正面の顔写真をアップロードすれば自動的に新しいアバターとしてセットアップされます。
+
 
 ---
 
@@ -111,3 +142,4 @@ drive.mount('/content/drive')
 3. **超高速 Wav2Lip パイプライン**:
    * 顔検出結果を事前にキャッシュ（`.npz`）化し、GPUテンソルに事前展開。
    * FFmpeg 標準入力（rawvideo パイプ）への直接流し込みによりディスクI/Oを極小化し、高速推論とアスペクト比維持の軽量エンコード（長辺480px）を実現しています。
+
