@@ -97,7 +97,7 @@ def fetch_latest_colab_url():
         res = requests.get(SYNC_ENDPOINT, timeout=3)
         if res.ok:
             remote_url = res.text.strip()
-            if remote_url.startswith("http") and ("gradio.live" in remote_url or "ngrok" in remote_url):
+            if remote_url.startswith("http") and ("gradio.live" in remote_url or "trycloudflare.com" in remote_url or "ngrok" in remote_url):
                 if remote_url != COLAB_GRADIO_URL:
                     print(f"🔄 最新のColab URLを自動同期しました: {remote_url}")
                     COLAB_GRADIO_URL = remote_url
@@ -116,7 +116,7 @@ def fetch_latest_colab_url():
         try:
             with open(CACHE_URL_FILE, "r", encoding="utf-8") as f:
                 saved = f.read().strip()
-                if saved.startswith("http") and ("gradio.live" in saved or "ngrok" in saved):
+                if saved.startswith("http") and ("gradio.live" in saved or "trycloudflare.com" in saved or "ngrok" in saved):
                     if saved != COLAB_GRADIO_URL:
                         COLAB_GRADIO_URL = saved
                         gradio_client = None
@@ -245,14 +245,38 @@ def chat_and_generate_video(req: ChatRequest):
     t0 = time.time()
     try:
         print("🚀 Colab で口パク動画を合成中...")
-        client = get_gradio_client()  # 安全にクライアントを取得
-        result_video_path = client.predict(
-            face_img_path=handle_file(FACE_IMG_PATH),
-            audio_path=handle_file(OUTPUT_AUDIO_PATH),
-            api_name="/process_pipeline"
-        )
-        shutil.copy(result_video_path, FINAL_VIDEO_PATH)
-        print(f"🎬 [3. 動画合成+転送] ({time.time() - t0:.2f}秒)")
+        colab_url = fetch_latest_colab_url()
+        video_success = False
+
+        # 【超高速優先ルート】ダイレクトAPI (/api/generate) へ音声のみ一撃POST
+        direct_url = f"{colab_url}/api/generate"
+        try:
+            with open(OUTPUT_AUDIO_PATH, "rb") as f:
+                res = requests.post(
+                    direct_url,
+                    files={"audio": ("output.wav", f, "audio/wav")},
+                    timeout=20
+                )
+            if res.ok and len(res.content) > 1000:
+                with open(FINAL_VIDEO_PATH, "wb") as out_f:
+                    out_f.write(res.content)
+                video_success = True
+                print(f"🎬 [3. 高速ダイレクト動画合成+転送] ({time.time() - t0:.2f}秒)")
+        except Exception as dir_err:
+            print(f"ℹ️ ダイレクトAPI待機/フォールバック: {dir_err}")
+
+        # 【フォールバック】従来の Gradio Client 経由
+        if not video_success:
+            print("🔄 Gradio Client へフォールバックして動画生成中...")
+            client = get_gradio_client()
+            result_video_path = client.predict(
+                face_img_path=handle_file(FACE_IMG_PATH),
+                audio_path=handle_file(OUTPUT_AUDIO_PATH),
+                api_name="/process_pipeline"
+            )
+            shutil.copy(result_video_path, FINAL_VIDEO_PATH)
+            print(f"🎬 [3. Gradioフォールバック動画合成] ({time.time() - t0:.2f}秒)")
+
     except HTTPException:
         raise
     except Exception as e:
@@ -295,16 +319,37 @@ async def upload_avatar(file: UploadFile = File(...)):
     t0 = time.time()
     try:
         print("🚀 Colab で新しいアバターのループ動画＆キャッシュを生成中...")
-        client = get_gradio_client()
-        result_idle_path = client.predict(
-            face_img_path=handle_file(temp_face_path),
-            api_name="/setup_avatar"
-        )
-
-        # 3. 生成された待機動画を static/avatar_idle.mp4 に上書き配置
+        colab_url = fetch_latest_colab_url()
+        setup_success = False
         dest_idle_path = os.path.join(STATIC_DIR, "avatar_idle.mp4")
-        shutil.copy(result_idle_path, dest_idle_path)
-        print(f"🎉 [アバター更新完了] ({time.time() - t0:.2f}秒): {dest_idle_path}")
+
+        # 【超高速優先ルート】ダイレクトAPI (/api/setup_avatar) へ画像を一撃POST
+        direct_url = f"{colab_url}/api/setup_avatar"
+        try:
+            with open(temp_face_path, "rb") as f:
+                res = requests.post(
+                    direct_url,
+                    files={"image": ("face.jpg", f, "image/jpeg")},
+                    timeout=90
+                )
+            if res.ok and len(res.content) > 1000:
+                with open(dest_idle_path, "wb") as out_f:
+                    out_f.write(res.content)
+                setup_success = True
+                print(f"🎉 [アバター更新完了 (ダイレクト)] ({time.time() - t0:.2f}秒): {dest_idle_path}")
+        except Exception as dir_err:
+            print(f"ℹ️ ダイレクトアバター更新待機/フォールバック: {dir_err}")
+
+        # 【フォールバック】従来の Gradio Client 経由
+        if not setup_success:
+            print("🔄 Gradio Client へフォールバックしてアバター更新中...")
+            client = get_gradio_client()
+            result_idle_path = client.predict(
+                face_img_path=handle_file(temp_face_path),
+                api_name="/setup_avatar"
+            )
+            shutil.copy(result_idle_path, dest_idle_path)
+            print(f"🎉 [アバター更新完了 (Gradio)] ({time.time() - t0:.2f}秒): {dest_idle_path}")
 
         return {
             "status": "success",

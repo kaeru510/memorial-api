@@ -525,10 +525,92 @@ with gr.Blocks() as demo:
         )
 
 # ==============================================================================
-# 7. URL自動クラウド同期（ローカルPCと完全自動接続）
+# 6.5. ダイレクト超高速 API (FastAPI 直結ルート) の登録
+# ==============================================================================
+from fastapi import UploadFile, File
+from fastapi.responses import FileResponse
+
+@demo.app.post("/api/generate")
+async def api_generate(audio: UploadFile = File(...)):
+    t0 = time.time()
+    temp_wav = f"/content/req_{int(time.time() * 1000)}.wav"
+    content = await audio.read()
+    with open(temp_wav, "wb") as f:
+        f.write(content)
+    try:
+        mp4_path = fast_process_pipeline(None, temp_wav)
+        print(f"⚡ [ダイレクトAPI動画生成完了] ({time.time() - t0:.2f}秒)", flush=True)
+        return FileResponse(mp4_path, media_type="video/mp4", filename="final_output.mp4")
+    finally:
+        if os.path.exists(temp_wav):
+            try:
+                os.remove(temp_wav)
+            except Exception:
+                pass
+
+@demo.app.post("/api/setup_avatar")
+async def api_setup_avatar(image: UploadFile = File(...)):
+    t0 = time.time()
+    temp_img = f"/content/face_{int(time.time() * 1000)}.jpg"
+    content = await image.read()
+    with open(temp_img, "wb") as f:
+        f.write(content)
+    try:
+        idle_path = setup_avatar(temp_img)
+        print(f"🎉 [ダイレクトAPIアバター更新完了] ({time.time() - t0:.2f}秒)", flush=True)
+        return FileResponse(idle_path, media_type="video/mp4", filename="avatar_idle.mp4")
+    finally:
+        if os.path.exists(temp_img):
+            try:
+                os.remove(temp_img)
+            except Exception:
+                pass
+
+# ==============================================================================
+# 7. 高速トンネル (Cloudflare) ＆ URL自動クラウド同期
 # ==============================================================================
 import threading
+import subprocess
+import re
 import requests
+
+def cloudflare_tunnel_worker():
+    print("📡 Cloudflare 高速トンネル (日本国内エッジ) をセットアップ中...", flush=True)
+    cf_bin = "/usr/local/bin/cloudflared"
+    if not os.path.exists(cf_bin):
+        try:
+            subprocess.run(["curl", "-sL", "https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64", "-o", cf_bin], check=True)
+            subprocess.run(["chmod", "+x", cf_bin], check=True)
+        except Exception as e:
+            print(f"⚠️ cloudflared インストールスキップ: {e}")
+            return
+
+    try:
+        proc = subprocess.Popen(
+            [cf_bin, "tunnel", "--url", "http://127.0.0.1:7860"],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=True
+        )
+        for line in proc.stdout:
+            if "trycloudflare.com" in line:
+                m = re.search(r"https://[a-zA-Z0-9-]+\.trycloudflare\.com", line)
+                if m:
+                    cf_url = m.group(0)
+                    print("\n" + "=" * 60)
+                    print(f"⚡ 【Cloudflare 高速トンネル起動完了】: {cf_url}")
+                    print("（超低遅延な日本国内エッジサーバー経由で高速通信します）")
+                    print("=" * 60 + "\n", flush=True)
+                    sync_endpoint = "https://api.cl1p.net/kaeru510-memorial"
+                    try:
+                        requests.post(sync_endpoint, data=cf_url.strip(), timeout=5)
+                    except Exception:
+                        pass
+                    break
+    except Exception as e:
+        print(f"⚠️ Cloudflare 起動スキップ: {e}")
+
+threading.Thread(target=cloudflare_tunnel_worker, daemon=True).start()
 
 def sync_url_worker():
     sync_endpoint = "https://api.cl1p.net/kaeru510-memorial"
@@ -542,7 +624,6 @@ def sync_url_worker():
                 print("\n" + "=" * 60)
                 print(f"📡 【URL自動同期完了】最新URLをクラウドに送信しました！")
                 print(f"👉 URL: {url}")
-                print(f"（ローカルPC側で自動検出されるため、コピペ不要です）")
                 print("=" * 60 + "\n")
                 break
             except Exception as e:
