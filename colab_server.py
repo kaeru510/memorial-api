@@ -48,9 +48,14 @@ if not os.path.exists(os.path.join(LIVEPORTRAIT_DIR, "inference.py")):
 # LivePortrait の依存パッケージ確認
 try:
     import tyro
+    import onnxruntime
 except ImportError:
-    print("📥 LivePortrait 依存ライブラリ (tyro, pykalman 等) をインストール中...")
-    subprocess.run(["pip", "install", "tyro", "pykalman", "pyyaml", "albumentations", "lmdb", "ffmpeg-python", "-q"], check=True)
+    print("📥 LivePortrait 依存ライブラリ (onnxruntime, tyro, pykalman 等) をインストール中...")
+    subprocess.run([
+        "pip", "install",
+        "onnxruntime-gpu", "onnxruntime", "tyro", "pykalman", "pyyaml",
+        "albumentations", "lmdb", "ffmpeg-python", "transformers", "-q"
+    ], check=False)
 
 
 if not os.path.exists(os.path.join(LIVEPORTRAIT_DIR, "pretrained_weights")):
