@@ -204,7 +204,7 @@
       </label>
       <input type="file" id="avatarInput" accept="image/*" style="display: none;" onchange="uploadAvatar(this)">
     </div>
-    <video id="idleVideo" class="avatar-video" src="/static/avatar_idle.mp4" autoplay loop muted playsinline></video>
+    <video id="idleVideo" class="avatar-video" autoplay loop muted playsinline></video>
     <video id="talkVideo" class="avatar-video" playsinline></video>
   </div>
 
@@ -226,6 +226,9 @@
 
 <script>
   const idleVideo = document.getElementById("idleVideo");
+  // キャッシュによる古い動画の再生を防止（常に最新のアバターを読み込む）
+  idleVideo.src = `/static/avatar_idle.mp4?t=${Date.now()}`;
+
   const talkVideo = document.getElementById("talkVideo");
   const textInput = document.getElementById("textInput");
   const sendBtn = document.getElementById("sendBtn");
