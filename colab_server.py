@@ -228,26 +228,53 @@ def setup_avatar(face_img_path):
             raise FileNotFoundError(f"モーション動画が見つかりません: {IDLE_VIDEO_PATH}")
 
         # 1. LivePortrait の実行（顔画像 + idleモーション動画）
-        print("🚀 [1/4] LivePortrait でベース表情モーションを生成中...")
+        print("🚀 [1/4] LivePortrait でベース表情モーションを生成中...", flush=True)
         lp_output_dir = os.path.join(LIVEPORTRAIT_DIR, "animations")
         os.makedirs(lp_output_dir, exist_ok=True)
+
+        # CPU時は推論時間を短縮するためモーション動画を最初の3秒（約75フレーム）に軽量化
+        active_driving_video = IDLE_VIDEO_PATH
+        if device == 'cpu':
+            temp_cpu_driving = "/content/temp_cpu_driving.mp4"
+            subprocess.run([
+                "ffmpeg", "-y", "-i", IDLE_VIDEO_PATH,
+                "-t", "3.0", "-c", "copy", temp_cpu_driving
+            ], check=False, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            if os.path.exists(temp_cpu_driving):
+                active_driving_video = temp_cpu_driving
+                print("⚡ CPU最適化: モーション動画を3秒（約75フレーム）に絞り高速化します", flush=True)
 
         lp_cmd = [
             sys.executable, "inference.py",
             "-s", face_img_path,
-            "-d", IDLE_VIDEO_PATH,
+            "-d", active_driving_video,
             "--flag_relative_motion",
             "--flag_do_crop"
         ]
         if device == 'cpu':
             lp_cmd.append("--flag_force_cpu")
-            print("⚠️ CPUモードのため LivePortrait に --flag_force_cpu を適用します")
+            print("⚠️ CPUモードのため LivePortrait に --flag_force_cpu を適用します", flush=True)
 
-        res = subprocess.run(lp_cmd, cwd=LIVEPORTRAIT_DIR, capture_output=True, text=True)
-        if res.returncode != 0:
+        # リアルタイムに進捗ログを出力
+        proc = subprocess.Popen(
+            lp_cmd,
+            cwd=LIVEPORTRAIT_DIR,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=True,
+            bufsize=1
+        )
+        output_lines = []
+        for line in proc.stdout:
+            print(line, end="", flush=True)
+            output_lines.append(line)
+        proc.wait()
+
+        if proc.returncode != 0:
+            full_err = "".join(output_lines[-20:])
             print("❌ LivePortrait 実行エラー:")
-            print(res.stderr)
-            raise RuntimeError(f"LivePortraitエラー: {res.stderr[-500:] if res.stderr else res.stdout[-500:]}")
+            print(full_err)
+            raise RuntimeError(f"LivePortraitエラー: {full_err}")
 
         generated_videos = [
             os.path.join(lp_output_dir, f) for f in os.listdir(lp_output_dir) if f.endswith(".mp4")
@@ -256,11 +283,11 @@ def setup_avatar(face_img_path):
             raise RuntimeError("LivePortrait の動画生成結果 (.mp4) が見つかりませんでした。")
 
         latest_lp = max(generated_videos, key=os.path.getmtime)
-        print(f"✅ LivePortrait 生成完了: {latest_lp}")
+        print(f"✅ LivePortrait 生成完了: {latest_lp}", flush=True)
 
 
-        # 2. 30秒ピンポンループ動画の作成
-        print("🚀 [2/4] 30秒のシームレス往復ループ動画を作成中...")
+        # 2. ピンポンループ動画の作成（CPU時は6秒、GPU時は30秒）
+        loop_duration = 6.0 if device == 'cpu' else 30.0
         BASE_LOOP_VIDEO = "/content/base_avatar_loop.mp4"
         cap = cv2.VideoCapture(latest_lp)
         fps = cap.get(cv2.CAP_PROP_FPS) or 25.0
@@ -279,7 +306,8 @@ def setup_avatar(face_img_path):
             raise RuntimeError("LivePortrait動画の読み込みに失敗しました。")
 
         pingpong_cycle = raw_frames + raw_frames[-2:0:-1] if len(raw_frames) > 1 else raw_frames
-        total_frames = int(30 * fps)
+        total_frames = int(loop_duration * fps)
+        print(f"🚀 [2/4] {loop_duration}秒の往復ループ動画を作成中 ({total_frames}フレーム)...", flush=True)
 
         fourcc = cv2.VideoWriter_fourcc(*'mp4v')
         out = cv2.VideoWriter(BASE_LOOP_VIDEO, fourcc, fps, (width, height))
@@ -291,7 +319,7 @@ def setup_avatar(face_img_path):
         out.release()
 
         # 3. Wav2Lipの顔検出器で全フレームの顔座標をキャッシュ
-        print("🚀 [3/4] 顔座標を計算・キャッシュ中...")
+        print(f"🚀 [3/4] 顔座標を計算・キャッシュ中 (全 {len(loop_frames)} フレーム)...", flush=True)
         import face_detection
         detector = face_detection.FaceAlignment(
             face_detection.LandmarksType._2D,
@@ -304,6 +332,8 @@ def setup_avatar(face_img_path):
         pads = [0, 10, 0, 0]
 
         for i in range(0, len(loop_frames), batch_size):
+            cur_end = min(i + batch_size, len(loop_frames))
+            print(f"   🔍 顔検出進捗: {cur_end}/{len(loop_frames)} フレーム...", flush=True)
             batch_f = loop_frames[i:i + batch_size]
             preds = detector.get_detections_for_batch(np.array(batch_f))
             for j, det in enumerate(preds):
@@ -321,7 +351,7 @@ def setup_avatar(face_img_path):
         np.savez_compressed(CACHE_FILE, coords=np.array(coords), fps=fps)
 
         # 4. メモリ内キャッシュを即座に再読み込み
-        print("🚀 [4/4] サーバーメモリのキャッシュを最新アバターに更新...")
+        print("🚀 [4/4] サーバーメモリのキャッシュを最新アバターに更新...", flush=True)
         reload_avatar_cache(BASE_LOOP_VIDEO, CACHE_FILE)
 
         # 5. ブラウザ待機用の軽量 avatar_idle.mp4 を生成
