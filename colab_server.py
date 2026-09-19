@@ -73,7 +73,7 @@ if not os.path.exists("/content/base_avatar_cache.npz") and os.path.exists(f"{DR
 if not os.path.exists(f"{WAV2LIP_DIR}/checkpoints/wav2lip_gan.pth") and os.path.exists(f"{DRIVE_DIR}/checkpoints/wav2lip_gan.pth"):
     shutil.copy(f"{DRIVE_DIR}/checkpoints/wav2lip_gan.pth", f"{WAV2LIP_DIR}/checkpoints/wav2lip_gan.pth")
 
-# (5) 顔検出モデル (s3fd) の確認
+# (5) 顔検出モデル (s3fd) の確認 & PyTorch 2.x パッチ適用
 sfd_dir = f"{WAV2LIP_DIR}/face_detection/detection/sfd"
 os.makedirs(sfd_dir, exist_ok=True)
 sfd_path = os.path.join(sfd_dir, "s3fd.pth")
@@ -85,6 +85,19 @@ if not os.path.exists(sfd_path) or os.path.getsize(sfd_path) < 1000000:
     ], check=False)
     for alias in ["s3fd-619a316847.pth", "s3fd-619a316812.pth"]:
         shutil.copy(sfd_path, os.path.join(sfd_dir, alias))
+
+# PyTorch 2.6+ 互換パッチ（weights_only=False）
+sfd_file = os.path.join(sfd_dir, "sfd_detector.py")
+if os.path.exists(sfd_file):
+    with open(sfd_file, "r") as f:
+        code = f.read()
+    if "weights_only=False" not in code:
+        code = code.replace("torch.load(path_to_detector)", "torch.load(path_to_detector, weights_only=False)")
+        code = code.replace("model_weights = torch.load(path_to_detector)", "model_weights = torch.load(path_to_detector, weights_only=False)")
+        with open(sfd_file, "w") as f:
+            f.write(code)
+        print("🔧 sfd_detector.py に PyTorch 互換パッチを適用しました")
+
 
 # ==============================================================================
 # 2. ディレクトリ移動 & パス設定
@@ -174,25 +187,40 @@ def setup_avatar(face_img_path):
     t_start = time.time()
     print(f"\n🎨 [アバター自動セットアップ開始] 入力画像: {face_img_path}")
 
-    # 1. LivePortrait の実行（顔画像 + idleモーション動画）
-    print("🚀 [1/4] LivePortrait でベース表情モーションを生成中...")
-    lp_output_dir = os.path.join(LIVEPORTRAIT_DIR, "animations")
-    os.makedirs(lp_output_dir, exist_ok=True)
+    try:
+        if not os.path.exists(face_img_path):
+            raise FileNotFoundError(f"入力顔画像が見つかりません: {face_img_path}")
 
-    lp_cmd = [
-        "python", "inference.py",
-        "-s", face_img_path,
-        "-d", IDLE_VIDEO_PATH,
-        "--flag_relative_motion",
-        "--flag_do_crop"
-    ]
-    subprocess.run(lp_cmd, cwd=LIVEPORTRAIT_DIR, check=True)
+        if not os.path.exists(IDLE_VIDEO_PATH):
+            raise FileNotFoundError(f"モーション動画が見つかりません: {IDLE_VIDEO_PATH}")
 
-    generated_videos = [
-        os.path.join(lp_output_dir, f) for f in os.listdir(lp_output_dir) if f.endswith(".mp4")
-    ]
-    latest_lp = max(generated_videos, key=os.path.getmtime)
-    print(f"✅ LivePortrait 生成完了: {latest_lp}")
+        # 1. LivePortrait の実行（顔画像 + idleモーション動画）
+        print("🚀 [1/4] LivePortrait でベース表情モーションを生成中...")
+        lp_output_dir = os.path.join(LIVEPORTRAIT_DIR, "animations")
+        os.makedirs(lp_output_dir, exist_ok=True)
+
+        lp_cmd = [
+            sys.executable, "inference.py",
+            "-s", face_img_path,
+            "-d", IDLE_VIDEO_PATH,
+            "--flag_relative_motion",
+            "--flag_do_crop"
+        ]
+        res = subprocess.run(lp_cmd, cwd=LIVEPORTRAIT_DIR, capture_output=True, text=True)
+        if res.returncode != 0:
+            print("❌ LivePortrait 実行エラー:")
+            print(res.stderr)
+            raise RuntimeError(f"LivePortraitエラー: {res.stderr[-500:] if res.stderr else res.stdout[-500:]}")
+
+        generated_videos = [
+            os.path.join(lp_output_dir, f) for f in os.listdir(lp_output_dir) if f.endswith(".mp4")
+        ]
+        if not generated_videos:
+            raise RuntimeError("LivePortrait の動画生成結果 (.mp4) が見つかりませんでした。")
+
+        latest_lp = max(generated_videos, key=os.path.getmtime)
+        print(f"✅ LivePortrait 生成完了: {latest_lp}")
+
 
     # 2. 30秒ピンポンループ動画の作成
     print("🚀 [2/4] 30秒のシームレス往復ループ動画を作成中...")
@@ -287,8 +315,14 @@ def setup_avatar(face_img_path):
     except Exception:
         pass
 
-    print(f"✨ アバターセットアップ完了！ (所要時間: {time.time() - t_start:.2f}秒)\n")
-    return avatar_idle_path
+        print(f"✨ アバターセットアップ完了！ (所要時間: {time.time() - t_start:.2f}秒)\n")
+        return avatar_idle_path
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        print(f"\n❌ [アバターセットアップ失敗]: {e}\n")
+        raise gr.Error(f"Colabアバター生成エラー: {e}")
+
 
 # ==============================================================================
 # 5. 高速対話推論関数 (fast_process_pipeline)
@@ -444,5 +478,6 @@ def sync_url_worker():
 
 threading.Thread(target=sync_url_worker, daemon=True).start()
 
-demo.launch(share=True, debug=True, allowed_paths=["/content"])
+demo.launch(share=True, debug=True, show_error=True, allowed_paths=["/content"])
+
 
