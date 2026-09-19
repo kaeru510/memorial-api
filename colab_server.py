@@ -61,13 +61,30 @@ except ImportError:
     ], check=False)
 
 
-if not os.path.exists(os.path.join(LIVEPORTRAIT_DIR, "pretrained_weights")):
-    print("📥 LivePortrait の重みファイルをダウンロード中...")
-    try:
-        from huggingface_hub import snapshot_download
-        snapshot_download(repo_id="KwaiVGI/LivePortrait", local_dir=os.path.join(LIVEPORTRAIT_DIR, "pretrained_weights"))
-    except Exception as e:
-        print(f"⚠️ LivePortrait 重み取得警告: {e}")
+target_weight = os.path.join(LIVEPORTRAIT_DIR, "pretrained_weights", "liveportrait", "base_models", "appearance_feature_extractor.pth")
+if not os.path.exists(target_weight):
+    print("📥 LivePortrait の重みファイルを準備中...")
+    drive_weights = os.path.join(DRIVE_DIR, "pretrained_weights")
+    if os.path.exists(os.path.join(drive_weights, "liveportrait", "base_models", "appearance_feature_extractor.pth")):
+        print("📁 Google Drive から LivePortrait の重みを復元中...")
+        shutil.copytree(drive_weights, os.path.join(LIVEPORTRAIT_DIR, "pretrained_weights"), dirs_exist_ok=True)
+        print("✅ Drive から重みを復元しました")
+    else:
+        print("📥 Hugging Face から LivePortrait の重みをダウンロード中 (約1.5GB)...")
+        try:
+            from huggingface_hub import snapshot_download
+            snapshot_download(repo_id="KwaiVGI/LivePortrait", local_dir=os.path.join(LIVEPORTRAIT_DIR, "pretrained_weights"))
+            print("✅ LivePortrait 重みダウンロード完了")
+            # 次回高速化のために Google Drive にバックアップ
+            try:
+                os.makedirs(drive_weights, exist_ok=True)
+                shutil.copytree(os.path.join(LIVEPORTRAIT_DIR, "pretrained_weights"), drive_weights, dirs_exist_ok=True)
+                print("💾 次回起動高速化のため Google Drive に重みをバックアップしました")
+            except Exception as be:
+                print(f"⚠️ Drive バックアップスキップ: {be}")
+        except Exception as e:
+            print(f"❌ LivePortrait 重み取得エラー: {e}")
+
 
 # (3) モーション動画 (idle.mp4) の準備
 if not os.path.exists(IDLE_VIDEO_PATH):
