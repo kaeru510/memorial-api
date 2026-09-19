@@ -37,7 +37,8 @@ ADMIN_PASSWORD = "a"
 GEMINI_API_KEY = "AQ.Ab8RN6LbxmRb_omIfiTr1Np-m-8euT6-lxyqiWnmHQg4MnA12g"
 
 # 3. Colab 実行時に発行された gradio.live の URL
-COLAB_GRADIO_URL = "https://e8535d860d194b0ee0.gradio.live"
+COLAB_GRADIO_URL = "https://c0e26bd7eae50e4bec.gradio.live"
+gradio_client = None
 
 # AivisSpeech 設定
 AIVIS_URL = "http://127.0.0.1:10101"
@@ -87,9 +88,10 @@ except Exception as e:
     print("⚠️ ウォームアップスキップ:", e)
 
 SYNC_ENDPOINT = "https://api.cl1p.net/kaeru510-memorial"
+CACHE_URL_FILE = os.path.join(BASE_DIR, "colab_url.txt")
 
 def fetch_latest_colab_url():
-    """クラウド同期エンドポイントから最新のColab URLを取得"""
+    """クラウド同期エンドポイントまたはローカルキャッシュから最新のColab URLを取得"""
     global COLAB_GRADIO_URL, gradio_client
     try:
         res = requests.get(SYNC_ENDPOINT, timeout=3)
@@ -100,9 +102,28 @@ def fetch_latest_colab_url():
                     print(f"🔄 最新のColab URLを自動同期しました: {remote_url}")
                     COLAB_GRADIO_URL = remote_url
                     gradio_client = None  # 再接続を促す
+                    try:
+                        with open(CACHE_URL_FILE, "w", encoding="utf-8") as f:
+                            f.write(remote_url)
+                    except Exception:
+                        pass
                 return remote_url
     except Exception as e:
         print(f"⚠️ URL自動取得スキップ: {e}")
+
+    # クラウド同期が応答しない場合はローカルキャッシュを確認
+    if os.path.exists(CACHE_URL_FILE):
+        try:
+            with open(CACHE_URL_FILE, "r", encoding="utf-8") as f:
+                saved = f.read().strip()
+                if saved.startswith("http") and ("gradio.live" in saved or "ngrok" in saved):
+                    if saved != COLAB_GRADIO_URL:
+                        COLAB_GRADIO_URL = saved
+                        gradio_client = None
+                    return saved
+        except Exception:
+            pass
+
     return COLAB_GRADIO_URL
 
 def get_gradio_client():
