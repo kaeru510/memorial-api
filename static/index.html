@@ -42,31 +42,16 @@
       object-fit: cover;
       transition: opacity 0.3s ease;
     }
-    #idleVideo { z-index: 1; opacity: 1; transition: transform 0.05s ease-out; }
-    #talkVideo { display: none; }
-
-    /* 下顎・リップシンクレイヤー（口元〜顎部分のみクリッピング） */
-    #jawVideo {
-      z-index: 3;
-      clip-path: ellipse(22% 16% at 50% 69%);
-      transform-origin: 50% 62%;
-      pointer-events: none;
-      transition: transform 0.04s ease-out;
-    }
-    /* 口腔内の自然な影（開口時に浮き出る） */
-    #mouthShadow {
-      position: absolute;
-      top: 67%;
-      left: 50%;
-      transform: translate(-50%, -50%);
-      width: 32px;
-      height: 12px;
-      background: radial-gradient(ellipse at center, rgba(30, 8, 8, 0.9) 0%, rgba(50, 15, 15, 0.4) 60%, transparent 100%);
-      border-radius: 50%;
-      pointer-events: none;
+    #idleVideo { z-index: 1; opacity: 1; }
+    #talkVideo {
       z-index: 2;
       opacity: 0;
-      transition: opacity 0.04s ease-out;
+      pointer-events: none;
+      transition: opacity 0.2s ease;
+    }
+    #talkVideo.active {
+      opacity: 1;
+      pointer-events: auto;
     }
 
 
@@ -231,8 +216,7 @@
       <input type="file" id="avatarInput" accept="image/*" style="display: none;" onchange="uploadAvatar(this)">
     </div>
     <video id="idleVideo" class="avatar-video" autoplay loop muted playsinline></video>
-    <div id="mouthShadow"></div>
-    <video id="jawVideo" class="avatar-video" autoplay loop muted playsinline></video>
+    <video id="talkVideo" class="avatar-video" playsinline></video>
   </div>
 
 
@@ -254,34 +238,16 @@
 
 <script>
   const idleVideo = document.getElementById("idleVideo");
-  const jawVideo = document.getElementById("jawVideo");
-  const mouthShadow = document.getElementById("mouthShadow");
+  // キャッシュによる古い動画の再生を防止（常に最新のアバターを読み込む）
+  idleVideo.src = `/static/avatar_idle.mp4?t=${Date.now()}`;
+
+  const talkVideo = document.getElementById("talkVideo");
   const textInput = document.getElementById("textInput");
   const sendBtn = document.getElementById("sendBtn");
   const micBtn = document.getElementById("micBtn");
   const statusDot = document.getElementById("statusDot");
   const statusText = document.getElementById("statusText");
   const subtitle = document.getElementById("subtitle");
-
-  // アバター動画のロードと同期
-  function setAvatarVideoSource(url) {
-    idleVideo.src = url;
-    jawVideo.src = url;
-    idleVideo.load();
-    jawVideo.load();
-    idleVideo.play().catch(() => {});
-    jawVideo.play().catch(() => {});
-  }
-
-  // 初期ロード
-  setAvatarVideoSource(`/static/avatar_idle.mp4?t=${Date.now()}`);
-
-  // 待機動画とリップシンク動画のフレーム同期
-  idleVideo.addEventListener("timeupdate", () => {
-    if (Math.abs(idleVideo.currentTime - jawVideo.currentTime) > 0.1) {
-      jawVideo.currentTime = idleVideo.currentTime;
-    }
-  });
 
   // Web Speech API
   const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
@@ -350,6 +316,14 @@
     }
   }
 
+  talkVideo.addEventListener("ended", () => {
+    talkVideo.classList.remove("active");
+    idleVideo.play();
+    statusDot.className = "status-dot";
+    statusText.innerText = "待機中";
+    setControlsDisabled(false);
+  });
+
   function setControlsDisabled(disabled) {
     sendBtn.disabled = disabled;
     micBtn.disabled = disabled;
@@ -357,77 +331,7 @@
   }
 
   // ====================================================
-  // Web Audio API リアルタイム・リップシンクエンジン
-  // ====================================================
-  let audioCtx = null;
-  let analyser = null;
-  let lipSyncAnimId = null;
-
-  function getAudioContext() {
-    if (!audioCtx) {
-      audioCtx = new (window.AudioContext || window.webkitAudioContext)();
-      analyser = audioCtx.createAnalyser();
-      analyser.fftSize = 256;
-      analyser.smoothingTimeConstant = 0.35;
-    }
-    if (audioCtx.state === 'suspended') {
-      audioCtx.resume();
-    }
-    return { audioCtx, analyser };
-  }
-
-  function startRealtimeLipSync(audioElement) {
-    const { audioCtx, analyser } = getAudioContext();
-    try {
-      const srcNode = audioCtx.createMediaElementSource(audioElement);
-      srcNode.connect(analyser);
-      analyser.connect(audioCtx.destination);
-    } catch (e) {}
-
-    const freqData = new Uint8Array(analyser.frequencyBinCount);
-    let smoothVol = 0;
-
-    function step() {
-      analyser.getByteFrequencyData(freqData);
-      let sum = 0;
-      const binCount = Math.min(freqData.length, 32);
-      for (let i = 2; i < binCount; i++) {
-        sum += freqData[i];
-      }
-      const rawVol = (sum / (binCount - 2)) / 255;
-      smoothVol = smoothVol * 0.3 + rawVol * 0.7;
-      const openAmount = Math.max(0, (smoothVol - 0.05) * 2.0);
-
-      // 下顎の開閉（scaleY & translateY）
-      const translateY = openAmount * 10;
-      const scaleY = 1 + openAmount * 0.15;
-      jawVideo.style.transform = `translateY(${translateY}px) scaleY(${scaleY})`;
-      mouthShadow.style.opacity = Math.min(openAmount * 1.4, 0.85);
-
-      // 声のアクセントで頭部が微小にリズムをとる
-      if (openAmount > 0.45) {
-        idleVideo.style.transform = `translateY(${openAmount * 2}px)`;
-      } else {
-        idleVideo.style.transform = "translateY(0)";
-      }
-
-      lipSyncAnimId = requestAnimationFrame(step);
-    }
-    step();
-  }
-
-  function stopRealtimeLipSync() {
-    if (lipSyncAnimId) {
-      cancelAnimationFrame(lipSyncAnimId);
-      lipSyncAnimId = null;
-    }
-    if (jawVideo) jawVideo.style.transform = "translateY(0) scaleY(1)";
-    if (mouthShadow) mouthShadow.style.opacity = "0";
-    if (idleVideo) idleVideo.style.transform = "translateY(0)";
-  }
-
-  // ====================================================
-  // メッセージ送信（超高速即レス対話）
+  // メッセージ送信（Wav2Lip 動画生成 ＆ 体感高速化演出）
   // ====================================================
   async function sendMessage() {
     const text = textInput.value.trim();
@@ -441,7 +345,18 @@
     textInput.value = "";
     subtitle.innerText = `あなた: ${text}`;
     statusDot.className = "status-dot thinking";
-    statusText.innerText = "考え中...";
+    statusText.innerText = "🤔 考え中...";
+
+    // 進行状況をリアルタイムに更新して待機ストレスを軽減
+    const startTime = Date.now();
+    const progressInterval = setInterval(() => {
+      const elapsed = (Date.now() - startTime) / 1000;
+      if (elapsed > 2.5) {
+        statusText.innerText = "🎬 動画を準備中...";
+      } else if (elapsed > 0.8) {
+        statusText.innerText = "🎙️ 声を作成中...";
+      }
+    }, 400);
 
     try {
       const response = await fetch("/chat", {
@@ -449,6 +364,8 @@
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ message: text })
       });
+
+      clearInterval(progressInterval);
 
       if (!response.ok) {
         const errorData = await response.json();
@@ -458,35 +375,20 @@
       const encodedReply = response.headers.get("X-Reply-Text");
       const replyText = encodedReply ? decodeURIComponent(encodedReply) : "返答を受信しました";
 
-      // 音声データ (audio/wav) を即座に再生＆リアルタイムリップシンク
+      // 生成された口パク動画 (MP4) を再生
       const blob = await response.blob();
-      const audioUrl = URL.createObjectURL(blob);
-      const audio = new Audio(audioUrl);
+      const videoUrl = URL.createObjectURL(blob);
 
-      audio.onplay = () => {
-        subtitle.innerText = `AI: ${replyText}`;
-        statusDot.className = "status-dot talking";
-        statusText.innerText = "お話し中";
-        startRealtimeLipSync(audio);
-      };
+      talkVideo.src = videoUrl;
+      await talkVideo.play();
 
-      audio.onended = () => {
-        stopRealtimeLipSync();
-        statusDot.className = "status-dot";
-        statusText.innerText = "待機中";
-        setControlsDisabled(false);
-      };
-
-      audio.onerror = () => {
-        stopRealtimeLipSync();
-        statusDot.className = "status-dot";
-        statusText.innerText = "待機中";
-        setControlsDisabled(false);
-      };
-
-      await audio.play();
+      talkVideo.classList.add("active");
+      subtitle.innerText = `AI: ${replyText}`;
+      statusDot.className = "status-dot talking";
+      statusText.innerText = "お話し中";
 
     } catch (err) {
+      clearInterval(progressInterval);
       console.error(err);
       alert(`エラー: ${err.message}`);
       statusDot.className = "status-dot";
@@ -527,8 +429,10 @@
 
       const data = await response.json();
 
-      // 新しい待機動画を両方のレイヤーに反映
-      setAvatarVideoSource(data.idle_video_url);
+      // 新しい待機動画をリロードして再生
+      idleVideo.src = data.idle_video_url;
+      idleVideo.load();
+      await idleVideo.play();
 
       subtitle.innerText = "✨ 新しいアバターへの切り替えが完了しました！話しかけてみてください。";
       statusDot.className = "status-dot";

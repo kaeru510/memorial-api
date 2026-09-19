@@ -450,7 +450,7 @@ def fast_process_pipeline(face_img_path, audio_path):
 
     t_enc = time.time()
     orig_h, orig_w, _ = full_frames[0].shape
-    max_dim = 480
+    max_dim = 400
     scale = min(max_dim / max(orig_h, orig_w), 1.0)
     target_w = int(orig_w * scale) // 2 * 2
     target_h = int(orig_h * scale) // 2 * 2
@@ -470,7 +470,8 @@ def fast_process_pipeline(face_img_path, audio_path):
         "-i", audio_path,
         "-c:v", "libx264",
         "-preset", "ultrafast",
-        "-crf", "26",
+        "-tune", "zerolatency",
+        "-crf", "28",
         "-c:a", "aac",
         "-b:a", "96k",
         "-map", "0:v:0",
