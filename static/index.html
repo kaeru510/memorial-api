@@ -46,16 +46,20 @@
     #talkVideo { z-index: 2; opacity: 0; pointer-events: none; }
     #talkVideo.active { opacity: 1; pointer-events: auto; }
 
-    /* 首をコクッとうなずく自然なヘッドジェスチャー */
-    @keyframes headNod {
-      0% { transform: translateY(0) scale(1); }
-      30% { transform: translateY(8px) scale(1.01); }
-      70% { transform: translateY(-2px) scale(0.998); }
-      100% { transform: translateY(0) scale(1); }
+    /* 人間らしい二重うなずき（コクッコクッ）＆ 思考中の首傾げモーション */
+    @keyframes humanNodAndThink {
+      0% { transform: scale(1) translateY(0) rotate(0deg); }
+      14% { transform: scale(1.035) translateY(18px) rotate(1.2deg); } /* 1回目の頷き（深く） */
+      28% { transform: scale(1.01) translateY(4px) rotate(0deg); }
+      42% { transform: scale(1.025) translateY(12px) rotate(0.8deg); } /* 2回目の頷き（うんうん） */
+      58% { transform: scale(1.012) translateY(3px) rotate(-1.8deg); } /* 思考中：首を少し傾げて考える */
+      78% { transform: scale(1.008) translateY(4px) rotate(-1.2deg); }
+      100% { transform: scale(1) translateY(0) rotate(0deg); }
     }
     .nodding {
-      animation: headNod 0.7s cubic-bezier(0.25, 1, 0.5, 1);
+      animation: humanNodAndThink 3.2s cubic-bezier(0.25, 1, 0.35, 1);
     }
+
 
 
     .status-badge {
@@ -327,10 +331,12 @@
   // 即時相槌（うなずき ＆ 音声）の設定
 
   const nodAudios = [
-    new Audio("/static/nod_1.wav"),
-    new Audio("/static/nod_2.wav"),
-    new Audio("/static/nod_3.wav")
+    new Audio(`/static/nod_1.wav?v=${Date.now()}`),
+    new Audio(`/static/nod_2.wav?v=${Date.now()}`),
+    new Audio(`/static/nod_3.wav?v=${Date.now()}`),
+    new Audio(`/static/nod_4.wav?v=${Date.now()}`)
   ];
+
   let currentNodAudio = null;
 
   function playImmediateNod() {

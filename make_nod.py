@@ -18,10 +18,12 @@ os.makedirs(STATIC_DIR, exist_ok=True)
 
 
 phrases = {
-    "nod_1.wav": "うん！",
-    "nod_2.wav": "えーっとね、",
-    "nod_3.wav": "そうだね、"
+    "nod_1.wav": "うんうん、そうだねー。えーっとね、",
+    "nod_2.wav": "なるほどねー！それはね、",
+    "nod_3.wav": "あー、分かるよ。えーっと、",
+    "nod_4.wav": "うん！ちょっと考えてみるね、"
 }
+
 
 for filename, text in phrases.items():
     print(f"生成中: {text} ...")
