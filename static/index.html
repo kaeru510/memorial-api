@@ -42,23 +42,9 @@
       object-fit: cover;
       transition: opacity 0.3s ease;
     }
-    #idleVideo { z-index: 1; opacity: 1; transform-origin: center bottom; }
+    #idleVideo { z-index: 1; opacity: 1; }
     #talkVideo { z-index: 2; opacity: 0; pointer-events: none; }
     #talkVideo.active { opacity: 1; pointer-events: auto; }
-
-    /* 人間らしい二重うなずき（コクッコクッ）＆ 思考中の首傾げモーション */
-    @keyframes humanNodAndThink {
-      0% { transform: scale(1) translateY(0) rotate(0deg); }
-      14% { transform: scale(1.035) translateY(18px) rotate(1.2deg); } /* 1回目の頷き（深く） */
-      28% { transform: scale(1.01) translateY(4px) rotate(0deg); }
-      42% { transform: scale(1.025) translateY(12px) rotate(0.8deg); } /* 2回目の頷き（うんうん） */
-      58% { transform: scale(1.012) translateY(3px) rotate(-1.8deg); } /* 思考中：首を少し傾げて考える */
-      78% { transform: scale(1.008) translateY(4px) rotate(-1.2deg); }
-      100% { transform: scale(1) translateY(0) rotate(0deg); }
-    }
-    .nodding {
-      animation: humanNodAndThink 3.2s cubic-bezier(0.25, 1, 0.35, 1);
-    }
 
 
 
@@ -328,32 +314,6 @@
     setControlsDisabled(false);
   });
 
-  // 即時相槌（うなずき ＆ 音声）の設定
-
-  const nodAudios = [
-    new Audio(`/static/nod_1.wav?v=${Date.now()}`),
-    new Audio(`/static/nod_2.wav?v=${Date.now()}`),
-    new Audio(`/static/nod_3.wav?v=${Date.now()}`),
-    new Audio(`/static/nod_4.wav?v=${Date.now()}`)
-  ];
-
-  let currentNodAudio = null;
-
-  function playImmediateNod() {
-    // 1. 首をコクッとうなずくモーション（0msで即時発動）
-    idleVideo.classList.remove("nodding");
-    void idleVideo.offsetWidth; // リフロー強制
-    idleVideo.classList.add("nodding");
-
-    // 2. ランダム相槌音声を即座に再生
-    try {
-      const idx = Math.floor(Math.random() * nodAudios.length);
-      currentNodAudio = nodAudios[idx];
-      currentNodAudio.currentTime = 0;
-      currentNodAudio.play().catch(() => {});
-    } catch (e) {}
-  }
-
   function setControlsDisabled(disabled) {
     sendBtn.disabled = disabled;
     micBtn.disabled = disabled;
@@ -374,9 +334,6 @@
     statusDot.className = "status-dot thinking";
     statusText.innerText = "考え中...";
 
-    // ★【実験 1】話し終えた瞬間に 0秒で「コクッとうなずいて相槌」を打つ
-    playImmediateNod();
-
     try {
       const response = await fetch("/chat", {
         method: "POST",
@@ -395,13 +352,6 @@
       const blob = await response.blob();
       const videoUrl = URL.createObjectURL(blob);
 
-      // 相槌音声が再生中なら、発話が被らないよう自然に終了を少し待つ
-      if (currentNodAudio && !currentNodAudio.paused) {
-        await new Promise(resolve => {
-          currentNodAudio.onended = resolve;
-          setTimeout(resolve, 600);
-        });
-      }
 
       talkVideo.src = videoUrl;
       await talkVideo.play();
