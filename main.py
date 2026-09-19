@@ -1,11 +1,20 @@
 import os
+import sys
 import time
 import requests
 import traceback
 import shutil
 import secrets
 import urllib.parse
-from fastapi import FastAPI, HTTPException, Depends, status
+
+# Windows の cp932 環境での絵文字出力エラー対策
+if sys.platform == "win32":
+    try:
+        sys.stdout.reconfigure(encoding="utf-8")
+        sys.stderr.reconfigure(encoding="utf-8")
+    except Exception:
+        pass
+from fastapi import FastAPI, HTTPException, Depends, status, UploadFile, File
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.security import HTTPBasic, HTTPBasicCredentials
@@ -214,3 +223,48 @@ def chat_and_generate_video(req: ChatRequest):
         filename="final_output.mp4",
         headers={"X-Reply-Text": encoded_reply, "Access-Control-Expose-Headers": "X-Reply-Text"}
     )
+
+
+# ====================================================
+# アバター自動生成・切り替えエンドポイント
+# ====================================================
+@app.post("/upload_avatar")
+async def upload_avatar(file: UploadFile = File(...)):
+    print("\n" + "=" * 50)
+    print(f"📷 新しいアバター画像を受信: {file.filename}")
+    print("=" * 50)
+
+    # 1. ローカルの face.jpg を上書き保存
+    temp_face_path = os.path.join(BASE_DIR, "face.jpg")
+    content = await file.read()
+    with open(temp_face_path, "wb") as f:
+        f.write(content)
+    print(f"✅ ローカルに保存しました: {temp_face_path}")
+
+    # 2. Colab GPU で setup_avatar を呼び出し
+    t0 = time.time()
+    try:
+        print("🚀 Colab で新しいアバターのループ動画＆キャッシュを生成中...")
+        client = get_gradio_client()
+        result_idle_path = client.predict(
+            face_img_path=handle_file(temp_face_path),
+            api_name="/setup_avatar"
+        )
+
+        # 3. 生成された待機動画を static/avatar_idle.mp4 に上書き配置
+        dest_idle_path = os.path.join(STATIC_DIR, "avatar_idle.mp4")
+        shutil.copy(result_idle_path, dest_idle_path)
+        print(f"🎉 [アバター更新完了] ({time.time() - t0:.2f}秒): {dest_idle_path}")
+
+        return {
+            "status": "success",
+            "message": "アバターを更新しました！",
+            "idle_video_url": f"/static/avatar_idle.mp4?t={int(time.time())}"
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        traceback.print_exc()
+        global gradio_client
+        gradio_client = None
+        raise HTTPException(status_code=500, detail=f"アバター生成エラー: {e}")

@@ -66,6 +66,32 @@
     .status-dot.talking { background-color: #2979ff; }
     @keyframes pulse { from { opacity: 0.3; } to { opacity: 1; } }
 
+    .avatar-actions {
+      position: absolute;
+      top: 15px;
+      right: 15px;
+      z-index: 10;
+    }
+    .avatar-change-btn {
+      background: rgba(0, 0, 0, 0.6);
+      backdrop-filter: blur(8px);
+      padding: 6px 12px;
+      border-radius: 20px;
+      font-size: 12px;
+      color: #ffffff;
+      cursor: pointer;
+      display: flex;
+      align-items: center;
+      gap: 6px;
+      transition: all 0.2s ease;
+      border: 1px solid rgba(255, 255, 255, 0.2);
+    }
+    .avatar-change-btn:hover {
+      background: rgba(41, 121, 255, 0.8);
+      border-color: #2979ff;
+    }
+
+
     .control-panel {
       padding: 20px;
       display: flex;
@@ -153,6 +179,12 @@
     <div class="status-badge">
       <div id="statusDot" class="status-dot"></div>
       <span id="statusText">待機中</span>
+    </div>
+    <div class="avatar-actions">
+      <label for="avatarInput" class="avatar-change-btn" title="新しい顔写真に変更">
+        📷 写真を変更
+      </label>
+      <input type="file" id="avatarInput" accept="image/*" style="display: none;" onchange="uploadAvatar(this)">
     </div>
     <video id="idleVideo" class="avatar-video" src="/static/avatar_idle.mp4" autoplay loop muted playsinline></video>
     <video id="talkVideo" class="avatar-video" playsinline></video>
@@ -315,6 +347,52 @@
       sendMessage();
     }
   });
+
+  async function uploadAvatar(input) {
+    if (!input.files || input.files.length === 0) return;
+    const file = input.files[0];
+
+    const formData = new FormData();
+    formData.append("file", file);
+
+    setControlsDisabled(true);
+    statusDot.className = "status-dot thinking";
+    statusText.innerText = "アバター生成中...";
+    subtitle.innerText = "💡 新しい写真からループ動画とキャッシュを生成中（約10〜15秒）...";
+
+    try {
+      const response = await fetch("/upload_avatar", {
+        method: "POST",
+        body: formData
+      });
+
+      if (!response.ok) {
+        const errorData = await response.json();
+        throw new Error(errorData.detail || "生成に失敗しました");
+      }
+
+      const data = await response.json();
+
+      // 新しい待機動画をリロードして再生
+      idleVideo.src = data.idle_video_url;
+      idleVideo.load();
+      await idleVideo.play();
+
+      subtitle.innerText = "✨ 新しいアバターへの切り替えが完了しました！話しかけてみてください。";
+      statusDot.className = "status-dot";
+      statusText.innerText = "待機中";
+
+    } catch (err) {
+      console.error(err);
+      alert(`アバター変更エラー: ${err.message}`);
+      subtitle.innerText = `エラー: ${err.message}`;
+      statusDot.className = "status-dot";
+      statusText.innerText = "待機中";
+    } finally {
+      setControlsDisabled(false);
+      input.value = "";
+    }
+  }
 </script>
 
 </body>
