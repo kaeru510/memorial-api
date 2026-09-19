@@ -222,98 +222,98 @@ def setup_avatar(face_img_path):
         print(f"✅ LivePortrait 生成完了: {latest_lp}")
 
 
-    # 2. 30秒ピンポンループ動画の作成
-    print("🚀 [2/4] 30秒のシームレス往復ループ動画を作成中...")
-    BASE_LOOP_VIDEO = "/content/base_avatar_loop.mp4"
-    cap = cv2.VideoCapture(latest_lp)
-    fps = cap.get(cv2.CAP_PROP_FPS) or 25.0
-    width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
-    height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+        # 2. 30秒ピンポンループ動画の作成
+        print("🚀 [2/4] 30秒のシームレス往復ループ動画を作成中...")
+        BASE_LOOP_VIDEO = "/content/base_avatar_loop.mp4"
+        cap = cv2.VideoCapture(latest_lp)
+        fps = cap.get(cv2.CAP_PROP_FPS) or 25.0
+        width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+        height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
 
-    raw_frames = []
-    while True:
-        ret, frame = cap.read()
-        if not ret:
-            break
-        raw_frames.append(frame)
-    cap.release()
+        raw_frames = []
+        while True:
+            ret, frame = cap.read()
+            if not ret:
+                break
+            raw_frames.append(frame)
+        cap.release()
 
-    if not raw_frames:
-        raise RuntimeError("LivePortrait動画の読み込みに失敗しました。")
+        if not raw_frames:
+            raise RuntimeError("LivePortrait動画の読み込みに失敗しました。")
 
-    pingpong_cycle = raw_frames + raw_frames[-2:0:-1] if len(raw_frames) > 1 else raw_frames
-    total_frames = int(30 * fps)
+        pingpong_cycle = raw_frames + raw_frames[-2:0:-1] if len(raw_frames) > 1 else raw_frames
+        total_frames = int(30 * fps)
 
-    fourcc = cv2.VideoWriter_fourcc(*'mp4v')
-    out = cv2.VideoWriter(BASE_LOOP_VIDEO, fourcc, fps, (width, height))
-    loop_frames = []
-    for i in range(total_frames):
-        f = pingpong_cycle[i % len(pingpong_cycle)]
-        out.write(f)
-        loop_frames.append(f)
-    out.release()
+        fourcc = cv2.VideoWriter_fourcc(*'mp4v')
+        out = cv2.VideoWriter(BASE_LOOP_VIDEO, fourcc, fps, (width, height))
+        loop_frames = []
+        for i in range(total_frames):
+            f = pingpong_cycle[i % len(pingpong_cycle)]
+            out.write(f)
+            loop_frames.append(f)
+        out.release()
 
-    # 3. Wav2Lipの顔検出器で全フレームの顔座標をキャッシュ
-    print("🚀 [3/4] 顔座標を計算・キャッシュ中...")
-    import face_detection
-    detector = face_detection.FaceAlignment(
-        face_detection.LandmarksType._2D,
-        flip_input=False,
-        device='cuda' if torch.cuda.is_available() else 'cpu'
-    )
+        # 3. Wav2Lipの顔検出器で全フレームの顔座標をキャッシュ
+        print("🚀 [3/4] 顔座標を計算・キャッシュ中...")
+        import face_detection
+        detector = face_detection.FaceAlignment(
+            face_detection.LandmarksType._2D,
+            flip_input=False,
+            device='cuda' if torch.cuda.is_available() else 'cpu'
+        )
 
-    batch_size = 32
-    coords = []
-    pads = [0, 10, 0, 0]
+        batch_size = 32
+        coords = []
+        pads = [0, 10, 0, 0]
 
-    for i in range(0, len(loop_frames), batch_size):
-        batch_f = loop_frames[i:i + batch_size]
-        preds = detector.get_detections_for_batch(np.array(batch_f))
-        for j, det in enumerate(preds):
-            if det is None:
-                coords.append(coords[-1] if coords else [0, height, 0, width])
-                continue
-            s = det
-            y1 = max(0, s[1] - pads[0])
-            y2 = min(height, s[3] + pads[1])
-            x1 = max(0, s[0] - pads[2])
-            x2 = min(width, s[2] + pads[3])
-            coords.append([int(y1), int(y2), int(x1), int(x2)])
+        for i in range(0, len(loop_frames), batch_size):
+            batch_f = loop_frames[i:i + batch_size]
+            preds = detector.get_detections_for_batch(np.array(batch_f))
+            for j, det in enumerate(preds):
+                if det is None:
+                    coords.append(coords[-1] if coords else [0, height, 0, width])
+                    continue
+                s = det
+                y1 = max(0, s[1] - pads[0])
+                y2 = min(height, s[3] + pads[1])
+                x1 = max(0, s[0] - pads[2])
+                x2 = min(width, s[2] + pads[3])
+                coords.append([int(y1), int(y2), int(x1), int(x2)])
 
-    CACHE_FILE = "/content/base_avatar_cache.npz"
-    np.savez_compressed(CACHE_FILE, coords=np.array(coords), fps=fps)
+        CACHE_FILE = "/content/base_avatar_cache.npz"
+        np.savez_compressed(CACHE_FILE, coords=np.array(coords), fps=fps)
 
-    # 4. メモリ内キャッシュを即座に再読み込み
-    print("🚀 [4/4] サーバーメモリのキャッシュを最新アバターに更新...")
-    reload_avatar_cache(BASE_LOOP_VIDEO, CACHE_FILE)
+        # 4. メモリ内キャッシュを即座に再読み込み
+        print("🚀 [4/4] サーバーメモリのキャッシュを最新アバターに更新...")
+        reload_avatar_cache(BASE_LOOP_VIDEO, CACHE_FILE)
 
-    # 5. ブラウザ待機用の軽量 avatar_idle.mp4 を生成
-    avatar_idle_path = "/content/avatar_idle.mp4"
-    max_dim = 480
-    scale = min(max_dim / max(height, width), 1.0)
-    target_w = int(width * scale) // 2 * 2
-    target_h = int(height * scale) // 2 * 2
+        # 5. ブラウザ待機用の軽量 avatar_idle.mp4 を生成
+        avatar_idle_path = "/content/avatar_idle.mp4"
+        max_dim = 480
+        scale = min(max_dim / max(height, width), 1.0)
+        target_w = int(width * scale) // 2 * 2
+        target_h = int(height * scale) // 2 * 2
 
-    cmd = [
-        "ffmpeg", "-y",
-        "-i", BASE_LOOP_VIDEO,
-        "-vf", f"scale={target_w}:{target_h}",
-        "-c:v", "libx264",
-        "-preset", "ultrafast",
-        "-crf", "26",
-        "-pix_fmt", "yuv420p",
-        "-an",
-        avatar_idle_path
-    ]
-    subprocess.run(cmd, check=True)
+        cmd = [
+            "ffmpeg", "-y",
+            "-i", BASE_LOOP_VIDEO,
+            "-vf", f"scale={target_w}:{target_h}",
+            "-c:v", "libx264",
+            "-preset", "ultrafast",
+            "-crf", "26",
+            "-pix_fmt", "yuv420p",
+            "-an",
+            avatar_idle_path
+        ]
+        subprocess.run(cmd, check=True)
 
-    # Google Drive にもバックアップ保存
-    try:
-        shutil.copy(BASE_LOOP_VIDEO, f"{DRIVE_DIR}/base_avatar_loop.mp4")
-        shutil.copy(CACHE_FILE, f"{DRIVE_DIR}/base_avatar_cache.npz")
-        shutil.copy(avatar_idle_path, f"{DRIVE_DIR}/avatar_idle.mp4")
-    except Exception:
-        pass
+        # Google Drive にもバックアップ保存
+        try:
+            shutil.copy(BASE_LOOP_VIDEO, f"{DRIVE_DIR}/base_avatar_loop.mp4")
+            shutil.copy(CACHE_FILE, f"{DRIVE_DIR}/base_avatar_cache.npz")
+            shutil.copy(avatar_idle_path, f"{DRIVE_DIR}/avatar_idle.mp4")
+        except Exception:
+            pass
 
         print(f"✨ アバターセットアップ完了！ (所要時間: {time.time() - t_start:.2f}秒)\n")
         return avatar_idle_path
