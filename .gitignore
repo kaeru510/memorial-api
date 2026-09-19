@@ -1,0 +1,34 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+.venv/
+venv/
+env/
+
+# Large binaries & engines
+AivisSpeech-Engine-*/
+LivePortrait/
+*.pth
+*.npz
+*.tar.gz
+*.zip
+
+# Media files (videos, audio, output temp)
+*.mp4
+*.wav
+*.avi
+static/*.mp4
+static/*.wav
+
+# Personal data / local images
+*.jpg
+*.jpeg
+*.png
+!static/*.svg
+
+# OS & Editor
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/

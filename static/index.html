@@ -1,0 +1,321 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>AI アバター対話</title>
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+      background-color: #1a1a1e;
+      color: #ffffff;
+      display: flex;
+      justify-content: center;
+      align-items: center;
+      min-height: 100vh;
+      padding: 20px;
+    }
+    .app-container {
+      background: #26262b;
+      width: 100%;
+      max-width: 480px;
+      border-radius: 20px;
+      overflow: hidden;
+      box-shadow: 0 10px 30px rgba(0, 0, 0, 0.5);
+      display: flex;
+      flex-direction: column;
+    }
+    .avatar-viewport {
+      position: relative;
+      width: 100%;
+      aspect-ratio: 1 / 1;
+      background-color: #000;
+      overflow: hidden;
+    }
+    .avatar-video {
+      position: absolute;
+      top: 0;
+      left: 0;
+      width: 100%;
+      height: 100%;
+      object-fit: cover;
+      transition: opacity 0.3s ease;
+    }
+    #idleVideo { z-index: 1; opacity: 1; }
+    #talkVideo { z-index: 2; opacity: 0; pointer-events: none; }
+    #talkVideo.active { opacity: 1; pointer-events: auto; }
+
+    .status-badge {
+      position: absolute;
+      top: 15px;
+      left: 15px;
+      z-index: 10;
+      background: rgba(0, 0, 0, 0.6);
+      backdrop-filter: blur(8px);
+      padding: 6px 14px;
+      border-radius: 20px;
+      font-size: 12px;
+      display: flex;
+      align-items: center;
+      gap: 8px;
+    }
+    .status-dot { width: 8px; height: 8px; border-radius: 50%; background-color: #00e676; }
+    .status-dot.listening { background-color: #ff1744; animation: pulse 0.8s infinite alternate; }
+    .status-dot.thinking { background-color: #ffab00; animation: pulse 1s infinite alternate; }
+    .status-dot.talking { background-color: #2979ff; }
+    @keyframes pulse { from { opacity: 0.3; } to { opacity: 1; } }
+
+    .control-panel {
+      padding: 20px;
+      display: flex;
+      flex-direction: column;
+      gap: 12px;
+    }
+    .chat-bubble {
+      background: #33333a;
+      padding: 12px 16px;
+      border-radius: 12px;
+      font-size: 14px;
+      line-height: 1.5;
+      min-height: 48px;
+      color: #e0e0e0;
+      word-break: break-word;
+    }
+    .input-row {
+      display: flex;
+      gap: 8px;
+      align-items: center;
+    }
+    textarea {
+      flex: 1;
+      height: 48px;
+      background: #1e1e24;
+      border: 1px solid #444;
+      border-radius: 12px;
+      padding: 12px 14px;
+      color: #fff;
+      font-size: 14px;
+      resize: none;
+      outline: none;
+    }
+    textarea:focus { border-color: #2979ff; }
+
+    .icon-btn {
+      width: 48px;
+      height: 48px;
+      border-radius: 12px;
+      border: none;
+      font-size: 20px;
+      display: flex;
+      justify-content: center;
+      align-items: center;
+      cursor: pointer;
+      transition: all 0.2s;
+    }
+    .send-btn {
+      background: #2979ff;
+      color: white;
+      font-size: 14px;
+      font-weight: bold;
+      padding: 0 16px;
+      width: auto;
+      height: 48px;
+      border-radius: 12px;
+      border: none;
+      cursor: pointer;
+    }
+    .send-btn:hover { background: #2264d1; }
+    .send-btn:disabled, .icon-btn:disabled {
+      background: #444;
+      cursor: not-allowed;
+      opacity: 0.6;
+    }
+
+    .mic-btn { background: #3a3a44; color: #fff; }
+    .mic-btn:hover { background: #4a4a58; }
+    .mic-btn.active {
+      background: #ff1744;
+      color: #fff;
+      animation: micPulse 1.2s infinite;
+    }
+    @keyframes micPulse {
+      0% { box-shadow: 0 0 0 0 rgba(255, 23, 68, 0.7); }
+      70% { box-shadow: 0 0 0 12px rgba(255, 23, 68, 0); }
+      100% { box-shadow: 0 0 0 0 rgba(255, 23, 68, 0); }
+    }
+  </style>
+</head>
+<body>
+
+<div class="app-container">
+  <div class="avatar-viewport">
+    <div class="status-badge">
+      <div id="statusDot" class="status-dot"></div>
+      <span id="statusText">待機中</span>
+    </div>
+    <video id="idleVideo" class="avatar-video" src="/static/avatar_idle.mp4" autoplay loop muted playsinline></video>
+    <video id="talkVideo" class="avatar-video" playsinline></video>
+  </div>
+
+  <div class="control-panel">
+    <div id="subtitle" class="chat-bubble">「話しかけてみてください（マイクまたは入力）」</div>
+    
+    <div class="input-row">
+      <button id="micBtn" class="icon-btn mic-btn" title="マイクで話す" onclick="toggleRecognition()">🎤</button>
+      <textarea id="textInput" placeholder="メッセージを入力またはマイクで発話..."></textarea>
+      <button id="sendBtn" class="send-btn" onclick="sendMessage()">送信</button>
+    </div>
+  </div>
+</div>
+
+<script>
+  const idleVideo = document.getElementById("idleVideo");
+  const talkVideo = document.getElementById("talkVideo");
+  const textInput = document.getElementById("textInput");
+  const sendBtn = document.getElementById("sendBtn");
+  const micBtn = document.getElementById("micBtn");
+  const statusDot = document.getElementById("statusDot");
+  const statusText = document.getElementById("statusText");
+  const subtitle = document.getElementById("subtitle");
+
+  // Web Speech API
+  const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
+  let recognition = null;
+  let isListening = false;
+  let finalTranscript = "";
+
+  if (SpeechRecognition) {
+    recognition = new SpeechRecognition();
+    recognition.lang = "ja-JP";
+    recognition.interimResults = true;
+    recognition.continuous = false;
+
+    recognition.onstart = () => {
+      isListening = true;
+      finalTranscript = "";
+      micBtn.classList.add("active");
+      micBtn.innerText = "⏹️";
+      statusDot.className = "status-dot listening";
+      statusText.innerText = "聞いています...";
+    };
+
+    recognition.onresult = (event) => {
+      let interim = "";
+      for (let i = event.resultIndex; i < event.results.length; i++) {
+        const transcript = event.results[i][0].transcript;
+        if (event.results[i].isFinal) {
+          finalTranscript += transcript;
+        } else {
+          interim += transcript;
+        }
+      }
+      textInput.value = finalTranscript || interim;
+    };
+
+    recognition.onerror = () => stopRecognition();
+
+    recognition.onend = () => {
+      stopRecognition();
+      const recognizedText = textInput.value.trim();
+      if (recognizedText) {
+        sendMessage();
+      }
+    };
+  } else {
+    micBtn.disabled = true;
+  }
+
+  function toggleRecognition() {
+    if (!recognition) return;
+    if (isListening) {
+      recognition.stop();
+    } else {
+      textInput.value = "";
+      try { recognition.start(); } catch (err) {}
+    }
+  }
+
+  function stopRecognition() {
+    isListening = false;
+    micBtn.classList.remove("active");
+    micBtn.innerText = "🎤";
+    if (statusText.innerText === "聞いています...") {
+      statusDot.className = "status-dot";
+      statusText.innerText = "待機中";
+    }
+  }
+
+  talkVideo.addEventListener("ended", () => {
+    talkVideo.classList.remove("active");
+    idleVideo.play();
+    statusDot.className = "status-dot";
+    statusText.innerText = "待機中";
+    setControlsDisabled(false);
+  });
+
+  function setControlsDisabled(disabled) {
+    sendBtn.disabled = disabled;
+    micBtn.disabled = disabled;
+    textInput.disabled = disabled;
+  }
+
+  async function sendMessage() {
+    const text = textInput.value.trim();
+    if (!text) return;
+
+    if (isListening && recognition) {
+      recognition.stop();
+    }
+
+    setControlsDisabled(true);
+    textInput.value = "";
+    subtitle.innerText = `あなた: ${text}`;
+    statusDot.className = "status-dot thinking";
+    statusText.innerText = "考え中...";
+
+    try {
+      const response = await fetch("/chat", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ message: text })
+      });
+
+      if (!response.ok) {
+        const errorData = await response.json();
+        throw new Error(errorData.detail || "エラーが発生しました");
+      }
+
+      const encodedReply = response.headers.get("X-Reply-Text");
+      const replyText = encodedReply ? decodeURIComponent(encodedReply) : "返答を受信しました";
+
+      const blob = await response.blob();
+      const videoUrl = URL.createObjectURL(blob);
+
+      talkVideo.src = videoUrl;
+      await talkVideo.play();
+
+      talkVideo.classList.add("active");
+      subtitle.innerText = `AI: ${replyText}`;
+      statusDot.className = "status-dot talking";
+      statusText.innerText = "お話し中";
+
+    } catch (err) {
+      console.error(err);
+      alert(`エラー: ${err.message}`);
+      statusDot.className = "status-dot";
+      statusText.innerText = "待機中";
+      setControlsDisabled(false);
+    }
+  }
+
+  textInput.addEventListener("keydown", (e) => {
+    if (e.key === "Enter" && !e.shiftKey) {
+      e.preventDefault();
+      sendMessage();
+    }
+  });
+</script>
+
+</body>
+</html>
