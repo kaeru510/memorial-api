@@ -36,8 +36,8 @@ ADMIN_PASSWORD = "a"
 # 2. Gemini API キー
 GEMINI_API_KEY = "AQ.Ab8RN6LbxmRb_omIfiTr1Np-m-8euT6-lxyqiWnmHQg4MnA12g"
 
-# 3. Colab 実行時に発行された gradio.live の URL
-COLAB_GRADIO_URL = "https://c0e26bd7eae50e4bec.gradio.live"
+# 3. Colab 実行時に発行された gradio.live / trycloudflare の URL
+COLAB_GRADIO_URL = "https://7e42be673fb0f0c312.gradio.live"
 gradio_client = None
 
 # AivisSpeech 設定
@@ -87,29 +87,33 @@ try:
 except Exception as e:
     print("⚠️ ウォームアップスキップ:", e)
 
-SYNC_ENDPOINT = "https://api.cl1p.net/kaeru510-memorial"
+SYNC_ENDPOINTS = [
+    "https://kvdb.io/A5pQ8K3wKqR2fP4s9Yx7Nz/colab_url",
+    "https://api.cl1p.net/kaeru510-memorial"
+]
 CACHE_URL_FILE = os.path.join(BASE_DIR, "colab_url.txt")
 
 def fetch_latest_colab_url():
     """クラウド同期エンドポイントまたはローカルキャッシュから最新のColab URLを取得"""
     global COLAB_GRADIO_URL, gradio_client
-    try:
-        res = requests.get(SYNC_ENDPOINT, timeout=3)
-        if res.ok:
-            remote_url = res.text.strip()
-            if remote_url.startswith("http") and ("gradio.live" in remote_url or "trycloudflare.com" in remote_url or "ngrok" in remote_url):
-                if remote_url != COLAB_GRADIO_URL:
-                    print(f"🔄 最新のColab URLを自動同期しました: {remote_url}")
-                    COLAB_GRADIO_URL = remote_url
-                    gradio_client = None  # 再接続を促す
-                    try:
-                        with open(CACHE_URL_FILE, "w", encoding="utf-8") as f:
-                            f.write(remote_url)
-                    except Exception:
-                        pass
-                return remote_url
-    except Exception as e:
-        print(f"⚠️ URL自動取得スキップ: {e}")
+    for ep in SYNC_ENDPOINTS:
+        try:
+            res = requests.get(ep, timeout=2)
+            if res.ok:
+                remote_url = res.text.strip()
+                if remote_url.startswith("http") and ("gradio.live" in remote_url or "trycloudflare.com" in remote_url or "ngrok" in remote_url):
+                    if remote_url != COLAB_GRADIO_URL:
+                        print(f"🔄 最新のColab URLを自動同期しました ({ep.split('/')[2]}): {remote_url}")
+                        COLAB_GRADIO_URL = remote_url
+                        gradio_client = None  # 再接続を促す
+                        try:
+                            with open(CACHE_URL_FILE, "w", encoding="utf-8") as f:
+                                f.write(remote_url)
+                        except Exception:
+                            pass
+                    return remote_url
+        except Exception:
+            pass
 
     # クラウド同期が応答しない場合はローカルキャッシュを確認
     if os.path.exists(CACHE_URL_FILE):
@@ -345,7 +349,7 @@ async def upload_avatar(file: UploadFile = File(...)):
             print("🔄 Gradio Client へフォールバックしてアバター更新中...")
             client = get_gradio_client()
             result_idle_path = client.predict(
-                face_img_path=handle_file(temp_face_path),
+                handle_file(temp_face_path),
                 api_name="/setup_avatar"
             )
             shutil.copy(result_idle_path, dest_idle_path)

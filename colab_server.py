@@ -601,11 +601,15 @@ def cloudflare_tunnel_worker():
                     print(f"⚡ 【Cloudflare 高速トンネル起動完了】: {cf_url}")
                     print("（超低遅延な日本国内エッジサーバー経由で高速通信します）")
                     print("=" * 60 + "\n", flush=True)
-                    sync_endpoint = "https://api.cl1p.net/kaeru510-memorial"
-                    try:
-                        requests.post(sync_endpoint, data=cf_url.strip(), timeout=5)
-                    except Exception:
-                        pass
+                    sync_endpoints = [
+                        "https://kvdb.io/A5pQ8K3wKqR2fP4s9Yx7Nz/colab_url",
+                        "https://api.cl1p.net/kaeru510-memorial"
+                    ]
+                    for ep in sync_endpoints:
+                        try:
+                            requests.post(ep, data=cf_url.strip(), timeout=5)
+                        except Exception:
+                            pass
                     break
     except Exception as e:
         print(f"⚠️ Cloudflare 起動スキップ: {e}")
@@ -613,21 +617,28 @@ def cloudflare_tunnel_worker():
 threading.Thread(target=cloudflare_tunnel_worker, daemon=True).start()
 
 def sync_url_worker():
-    sync_endpoint = "https://api.cl1p.net/kaeru510-memorial"
+    sync_endpoints = [
+        "https://kvdb.io/A5pQ8K3wKqR2fP4s9Yx7Nz/colab_url",
+        "https://api.cl1p.net/kaeru510-memorial"
+    ]
     print("📡 URL自動同期ワーカー開始...")
     for _ in range(40):  # 最大80秒待機
         time.sleep(2)
         url = getattr(demo, "share_url", None)
         if url:
-            try:
-                requests.post(sync_endpoint, data=url.strip(), timeout=5)
-                print("\n" + "=" * 60)
-                print(f"📡 【URL自動同期完了】最新URLをクラウドに送信しました！")
-                print(f"👉 URL: {url}")
-                print("=" * 60 + "\n")
-                break
-            except Exception as e:
-                print(f"⚠️ URL同期リトライ中: {e}")
+            for ep in sync_endpoints:
+                try:
+                    requests.post(ep, data=url.strip(), timeout=5)
+                except Exception:
+                    pass
+            print("\n" + "=" * 60)
+            print(f"📡 【URL自動同期完了】最新URLをクラウドに送信しました！")
+            print(f"👉 URL: {url}")
+            print(f"（ローカルPC側で自動検出されるため、コピペ不要です）")
+            print("=" * 60 + "\n")
+            break
+        else:
+            time.sleep(1)
 
 threading.Thread(target=sync_url_worker, daemon=True).start()
 

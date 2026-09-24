@@ -64,66 +64,32 @@ C:\dev\memorial-api\
 
 ---
 
-## 4. 起動手順（1から動かす完全ガイド）
+## 4. 起動手順（わずか2クリックで完了！）
 
-本システムは **「ローカルPC（音声＆Webサーバー）」** と **「Google Colab（動画生成）」** の2つを起動することで対話可能になります。
+### ステップ 1: Google Colab で「▶」を押す（1セル完結）
+Google Colab ノートブックに以下のセルを作成し、**「▶（実行ボタン）」を1回押すだけ** です：
 
----
-
-### ステップ 1: ローカルサーバーを起動する（3つの方法から選べます）
-
-#### 【方法 A】AI アシスタントにお願いする（一番簡単）
-チャットで **「ローカルサーバーを起動して」** と指示するだけで、AivisSpeech と FastAPI の両方がバックグラウンドで自動起動します。
-
-#### 【方法 B】ワンクリック起動（バッチファイル）
-プロジェクトフォルダ内の **`start_local.bat`** をダブルクリックするだけで、必要な2つのサーバーが一括で起動します。
-
-#### 【方法 C】手動コマンド起動（PowerShell）
-別々の PowerShell ウィンドウを開き、以下を実行します：
-1. **AivisSpeech 音声エンジン起動**:
-   ```powershell
-   & "C:\dev\memorial-api\AivisSpeech-Engine-Windows-x64-1.2.0\Windows-x64\run.exe" --host 127.0.0.1 --port 10101
-   ```
-2. **FastAPI メインサーバー起動**:
-   ```powershell
-   $env:PYTHONUTF8="1"
-   & "C:\Users\yamada\anaconda3\envs\grave\python.exe" -m uvicorn main:app --host 127.0.0.1 --port 8000 --reload
-   ```
-
----
-
-### ステップ 2: Google Colab サーバーを起動する（動画生成）
-
-1. ブラウザで Google Colab ノートブックを開きます。
-2. **ランタイムのタイプを選択**:
-   * **検証・テスト時（無料枠を温存したい場合）**: **CPU**（ハードウェアアクセラレータ「なし」）でOKです。軽量化により約2〜3分で起動します。
-   * **本格対話時（超高速1〜2秒応答にしたい場合）**: **T4 GPU**（メニュー「ランタイム」➔「ランタイムのタイプを変更」➔「T4 GPU」）を選択します。
-3. ノートブック上で以下の2つのセルを実行します：
-
-**【セル 1】Google Drive マウント（キャッシュ・モデル保持用）**
 ```python
+# 🚀 1クリック全自動起動（Driveマウント & サーバー起動）
+import os
 from google.colab import drive
-drive.mount('/content/drive')
-```
 
-**【セル 2】サーバー起動（GitHubから最新コードを自動同期）**
-```python
+if not os.path.exists('/content/drive/MyDrive'):
+    drive.mount('/content/drive')
+
 !git clone https://github.com/kaeru510/memorial-api.git /content/memorial-api 2>/dev/null || (cd /content/memorial-api && git pull)
 !python /content/memorial-api/colab_server.py
 ```
-> [!NOTE]
-> Colab 起動時に発行される `gradio.live` の URL は、クラウド同期（`cl1p.net`）経由でローカルPCへ**完全自動通知**されるため、URLのコピペ作業は一切不要です。
+> [!IMPORTANT]
+> **Colab のハードウェア設定は「T4 GPU」** を指定してください（メニューの「ランタイム」→「ランタイムのタイプを変更」→「T4 GPU」）。
+> 起動すると、最新の接続URLがクラウド経由でローカルPCへ**全自動同期**されます（URLのコピペは一切不要です）。
 
 ---
 
-### ステップ 3: ブラウザでアクセスして対話開始
-
-1. ブラウザで **[http://localhost:8000](http://localhost:8000)** にアクセスします。
-2. Basic認証ダイアログが表示されたら入力します：
-   * **ユーザー名**: `a`
-   * **パスワード**: `a`
-3. マイクボタンを押して音声で話しかけるか、画面下のテキストボックスからメッセージを入力すると、アバターが音声に合わせて滑らかに口パク対話します。
-4. アバターを変更したい場合は、右上の **「📷 写真を変更」** から正面の顔写真をアップロードすれば自動的に新しいアバターとしてセットアップされます。
+### ステップ 2: デスクトップの起動アイコンをダブルクリック
+デスクトップに作成された **`LipSync起動.bat`** をダブルクリックします。
+- 音声合成エンジン（AivisSpeech）と FastAPI がバックグラウンド（最小化）で自動起動します。
+- 準備が整うと、**自動でブラウザ（http://localhost:8000）が開いて即座に対話可能** になります！
 
 
 ---
