@@ -86,16 +86,8 @@ if not os.path.exists(target_weight):
             print(f"❌ LivePortrait 重み取得エラー: {e}")
 
 
-# (3) 表情豊かなリッチモーション動画 (d0.mp4: 微笑み＆頷き) の準備
-lp_default_d0 = f"{LIVEPORTRAIT_DIR}/assets/examples/driving/d0.mp4"
-if os.path.exists(lp_default_d0):
-    shutil.copy(lp_default_d0, IDLE_VIDEO_PATH)
-    print("✅ LivePortrait 表情豊かなリッチモーション (d0.mp4) を設定しました")
-elif not os.path.exists(IDLE_VIDEO_PATH):
-    drive_idle = f"{DRIVE_DIR}/idle.mp4"
-    if os.path.exists(drive_idle):
-        shutil.copy(drive_idle, IDLE_VIDEO_PATH)
-        print("✅ Drive から idle.mp4 を配置しました")
+# (3) 自律モーション生成モジュール (procedural_motion) の準備
+print("✅ 自律モーション生成モジュール (procedural_motion) 準備完了（外部参照動画は不要です）")
 
 
 # (4) Drive からの初期ファイル復元（存在すれば利用）
@@ -225,30 +217,30 @@ def setup_avatar(face_img_path):
         if not os.path.exists(face_img_path):
             raise FileNotFoundError(f"入力顔画像が見つかりません: {face_img_path}")
 
-        if not os.path.exists(IDLE_VIDEO_PATH):
-            raise FileNotFoundError(f"モーション動画が見つかりません: {IDLE_VIDEO_PATH}")
+        # 1. 外部動画不要！数式アルゴリズムから自律モーションテンプレート(.pkl)を生成
+        procedural_pkl = "/content/procedural_idle.pkl"
+        print("🧠 [1/4] 数式アルゴリズムから自律待機モーション（呼吸・ゆらぎ・まばたき）を生成中...", flush=True)
+        try:
+            from procedural_motion import save_procedural_motion_template
+        except ImportError:
+            sys.path.append("/content/memorial-api")
+            from procedural_motion import save_procedural_motion_template
 
-        # 1. LivePortrait の実行（顔画像 + idleモーション動画）
-        print("🚀 [1/4] LivePortrait でベース表情モーションを生成中...", flush=True)
+        duration = 4.0 if device == 'cpu' else 8.0
+        save_procedural_motion_template(
+            procedural_pkl,
+            motion_type="idle",
+            duration_sec=duration,
+            fps=25
+        )
+
         lp_output_dir = os.path.join(LIVEPORTRAIT_DIR, "animations")
         os.makedirs(lp_output_dir, exist_ok=True)
-
-        # CPU時は推論時間を短縮するためモーション動画を最初の3秒（約75フレーム）に軽量化
-        active_driving_video = IDLE_VIDEO_PATH
-        if device == 'cpu':
-            temp_cpu_driving = "/content/temp_cpu_driving.mp4"
-            subprocess.run([
-                "ffmpeg", "-y", "-i", IDLE_VIDEO_PATH,
-                "-t", "3.0", "-c", "copy", temp_cpu_driving
-            ], check=False, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-            if os.path.exists(temp_cpu_driving):
-                active_driving_video = temp_cpu_driving
-                print("⚡ CPU最適化: モーション動画を3秒（約75フレーム）に絞り高速化します", flush=True)
 
         lp_cmd = [
             sys.executable, "inference.py",
             "-s", face_img_path,
-            "-d", active_driving_video,
+            "-d", procedural_pkl,
             "--flag_relative_motion",
             "--flag_do_crop",
             "--driving_option", "expression-friendly",

@@ -1,3 +1,4 @@
+import re
 import os
 import sys
 import time
@@ -62,7 +63,15 @@ SYSTEM_INSTRUCTION = """
 1. 友達のように明るく親しみやすい口調で話してください。
 2. 会話のテンポを最優先するため、必ず1文のみ（15文字〜35文字程度）で短く簡潔に答えてください。
 3. 文末は「〜だよ」「〜ですね」など、自然に会話を完結させてください。
-4. 絵文字、記号、マークダウン記号（*や#）、括弧による注釈は一切含めないでください。
+4. 返答の先頭に必ず感情タグ [happy], [nod], [curious], [normal] のいずれか1つを付与してください。
+   ・共感・相槌・肯定: [nod]
+   ・嬉しい話題・感謝・挨拶: [happy]
+   ・質問・疑問・聞き返し: [curious]
+   ・通常の返答: [normal]
+   例: [happy] 今日も会えて嬉しいよ！
+   例: [nod] それは素晴らしいですね！
+   例: [curious] それってどういう意味なの？
+5. 絵文字、記号、マークダウン記号（*や#）、括弧による注釈は一切含めないでください。
 """
 
 gemini_client = genai.Client(api_key=GEMINI_API_KEY)
@@ -207,13 +216,21 @@ def chat_and_generate_video(req: ChatRequest):
 
     # 1. Gemini で返答文生成（万が一のAPI制限時もフォールバックで落とさない）
     t0 = time.time()
+    emotion = "nod"
     try:
         response = chat_session.send_message(req.message)
-        reply_text = response.text.strip()
-        print(f"🤖 [1. AI思考] ({time.time() - t0:.2f}秒): {reply_text}")
+        raw_reply = response.text.strip()
+        m = re.match(r"^\[(happy|nod|curious|normal)\]\s*(.*)", raw_reply)
+        if m:
+            emotion = m.group(1)
+            reply_text = m.group(2).strip()
+        else:
+            reply_text = raw_reply
+        print(f"🤖 [1. AI思考 ({emotion})] ({time.time() - t0:.2f}秒): {reply_text}")
     except Exception as e:
         print(f"⚠️ Gemini APIエラー検知: {e}")
         reply_text = "おはようございます！今日も一日楽しくお話ししましょうね。"
+        emotion = "nod"
         print(f"🤖 [代替返答] ({time.time() - t0:.2f}秒): {reply_text}")
 
 # 2. AivisSpeech で音声合成（話速1.15倍でテンポUP & フレーム数削減）
@@ -298,7 +315,11 @@ def chat_and_generate_video(req: ChatRequest):
         FINAL_VIDEO_PATH,
         media_type="video/mp4",
         filename="final_output.mp4",
-        headers={"X-Reply-Text": encoded_reply, "Access-Control-Expose-Headers": "X-Reply-Text"}
+        headers={
+            "X-Reply-Text": encoded_reply,
+            "X-Emotion": emotion,
+            "Access-Control-Expose-Headers": "X-Reply-Text, X-Emotion"
+        }
     )
 
 

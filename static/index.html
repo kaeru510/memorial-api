@@ -374,16 +374,26 @@
 
       const encodedReply = response.headers.get("X-Reply-Text");
       const replyText = encodedReply ? decodeURIComponent(encodedReply) : "返答を受信しました";
+      const emotion = response.headers.get("X-Emotion") || "normal";
+
+      const emotionIcons = {
+        happy: "😊 ",
+        nod: "🤝 ",
+        curious: "🤔 ",
+        normal: "💬 "
+      };
+      const icon = emotionIcons[emotion] || "";
 
       // 生成された口パク動画 (MP4) を再生
       const blob = await response.blob();
       const videoUrl = URL.createObjectURL(blob);
 
       talkVideo.src = videoUrl;
+      talkVideo.dataset.emotion = emotion;
       await talkVideo.play();
 
       talkVideo.classList.add("active");
-      subtitle.innerText = `AI: ${replyText}`;
+      subtitle.innerText = `AI: ${icon}${replyText}`;
       statusDot.className = "status-dot talking";
       statusText.innerText = "お話し中";
 
