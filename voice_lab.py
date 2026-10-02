@@ -176,7 +176,16 @@ def train(model, epochs=100, batch=4, save_every=500, install_fn=None):
             i = log.rfind("style_gen")
             elsewhere = glob.glob(f"{data_dir}/**/*.npy", recursive=True)[:3]
             wavs = glob.glob(f"{data_dir}/wavs/**/*.wav", recursive=True)[:3]
+
+            def head(path, n=600):
+                try:
+                    return repr(open(path, "rb").read()[:n].decode("utf-8", "replace"))
+                except Exception as e:
+                    return f"(読めない: {e})"
             raise RuntimeError(f"スタイル特徴ファイルが作られていません。wavs例={wavs} 他の場所のnpy={elsewhere}\n"
+                               f"--- esd.list 先頭 ---\n{head(f'{data_dir}/esd.list', 300)}\n"
+                               f"--- train.list 先頭 ---\n{head(f'{data_dir}/train.list')}\n"
+                               f"--- text_error.log 先頭 ---\n{head(f'{data_dir}/text_error.log', 1500)}\n"
                                f"--- style_gen のログ ---\n{log[-3500:]}")
     else:
         _log("前回の続きから学習を再開します")
