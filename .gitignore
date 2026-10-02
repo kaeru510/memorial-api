@@ -33,3 +33,8 @@ Thumbs.db
 .vscode/
 .idea/
 
+
+# Secrets (API keys)
+.env
+# Colab 起動用ノートブック（ngrok の authtoken を含むため公開しない）
+colab_start.ipynb

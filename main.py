@@ -34,12 +34,31 @@ from google.genai import types
 ADMIN_USERNAME = "a"
 ADMIN_PASSWORD = "a"
 
-# 2. Gemini API キー
-GEMINI_API_KEY = "AQ.Ab8RN6LbxmRb_omIfiTr1Np-m-8euT6-lxyqiWnmHQg4MnA12g"
+# 2. Gemini API キー（コードには書かず、環境変数 or 同じフォルダの .env から読み込む）
+def load_env_file(path):
+    """KEY=VALUE 形式の .env を読み、未設定の環境変数だけ補完する（追加パッケージ不要）"""
+    if not os.path.exists(path):
+        return
+    with open(path, "r", encoding="utf-8") as f:
+        for line in f:
+            line = line.strip()
+            if not line or line.startswith("#") or "=" not in line:
+                continue
+            key, value = line.split("=", 1)
+            os.environ.setdefault(key.strip(), value.strip().strip('"').strip("'"))
 
-# 3. Colab 実行時に発行された gradio.live / trycloudflare の URL
-COLAB_GRADIO_URL = "https://7e42be673fb0f0c312.gradio.live"
+load_env_file(os.path.join(os.path.dirname(os.path.abspath(__file__)), ".env"))
+GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY")
+if not GEMINI_API_KEY:
+    raise RuntimeError("GEMINI_API_KEY が未設定です。main.py と同じフォルダの .env に GEMINI_API_KEY=... を書いてください。")
+
+# 3. Colab サーバーの URL
+#    .env に COLAB_FIXED_URL（ngrok の固定ドメイン）があれば常にそれを使い、クラウド同期は行わない
+COLAB_FIXED_URL = os.environ.get("COLAB_FIXED_URL", "").strip().rstrip("/")
+COLAB_GRADIO_URL = COLAB_FIXED_URL or "https://7e42be673fb0f0c312.gradio.live"
 gradio_client = None
+# ngrok 無料プランの警告ページを飛ばすヘッダー（ngrok 以外では無視される）
+TUNNEL_HEADERS = {"ngrok-skip-browser-warning": "true"}
 
 # AivisSpeech 設定
 AIVIS_URL = "http://127.0.0.1:10101"
@@ -105,6 +124,8 @@ CACHE_URL_FILE = os.path.join(BASE_DIR, "colab_url.txt")
 def fetch_latest_colab_url():
     """クラウド同期エンドポイントまたはローカルキャッシュから最新のColab URLを取得"""
     global COLAB_GRADIO_URL, gradio_client
+    if COLAB_FIXED_URL:
+        return COLAB_GRADIO_URL  # 固定URL運用（画面の鉛筆から一時的に変えた場合はその値）
     for ep in SYNC_ENDPOINTS:
         try:
             res = requests.get(ep, timeout=2)
@@ -149,7 +170,7 @@ def get_gradio_client():
     if gradio_client is None:
         print(f"🌐 Colab サーバーへ接続中: {COLAB_GRADIO_URL}")
         try:
-            gradio_client = Client(COLAB_GRADIO_URL)
+            gradio_client = Client(COLAB_GRADIO_URL, headers=TUNNEL_HEADERS)
             print("✅ Colab 接続完了！")
         except Exception as e:
             # 接続失敗時、もう一度最新URLの同期を試みる
@@ -158,7 +179,7 @@ def get_gradio_client():
             if latest_url and latest_url != COLAB_GRADIO_URL:
                 try:
                     COLAB_GRADIO_URL = latest_url
-                    gradio_client = Client(COLAB_GRADIO_URL)
+                    gradio_client = Client(COLAB_GRADIO_URL, headers=TUNNEL_HEADERS)
                     print("✅ 再取得URLでのColab接続完了！")
                     return gradio_client
                 except Exception:
@@ -276,6 +297,7 @@ def chat_and_generate_video(req: ChatRequest):
                 res = requests.post(
                     direct_url,
                     files={"audio": ("output.wav", f, "audio/wav")},
+                    headers=TUNNEL_HEADERS,
                     timeout=20
                 )
             if res.ok and len(res.content) > 1000:
@@ -355,6 +377,7 @@ async def upload_avatar(file: UploadFile = File(...)):
                 res = requests.post(
                     direct_url,
                     files={"image": ("face.jpg", f, "image/jpeg")},
+                    headers=TUNNEL_HEADERS,
                     timeout=90
                 )
             if res.ok and len(res.content) > 1000:
@@ -407,8 +430,15 @@ def set_colab_url(req: SetUrlRequest):
     new_url = req.url.strip()
     COLAB_GRADIO_URL = new_url
     gradio_client = None
+    # 次回の fetch_latest_colab_url() でクラウド側の古いURLに戻されないよう、全同期先とローカルキャッシュを更新
+    for ep in SYNC_ENDPOINTS:
+        try:
+            requests.post(ep, data=new_url, timeout=3)
+        except Exception as e:
+            print(f"⚠️ URL同期失敗 ({ep.split('/')[2]}): {e}")
     try:
-        requests.post(SYNC_ENDPOINT, data=new_url, timeout=3)
+        with open(CACHE_URL_FILE, "w", encoding="utf-8") as f:
+            f.write(new_url)
     except Exception:
         pass
     return {"status": "success", "url": COLAB_GRADIO_URL}

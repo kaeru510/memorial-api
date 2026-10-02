@@ -606,7 +606,44 @@ def cloudflare_tunnel_worker():
     except Exception as e:
         print(f"⚠️ Cloudflare 起動スキップ: {e}")
 
-threading.Thread(target=cloudflare_tunnel_worker, daemon=True).start()
+def ngrok_tunnel_worker(authtoken, domain):
+    """ngrok の固定ドメインでトンネルを張る（起動のたびにURLが変わらない）"""
+    print(f"📡 ngrok 固定トンネルをセットアップ中: https://{domain}", flush=True)
+    ngrok_bin = "/usr/local/bin/ngrok"
+    if not os.path.exists(ngrok_bin):
+        try:
+            subprocess.run(["curl", "-sL", "https://bin.equinox.io/c/bNyj1mQVY4c/ngrok-v3-stable-linux-amd64.tgz", "-o", "/tmp/ngrok.tgz"], check=True)
+            subprocess.run(["tar", "-xzf", "/tmp/ngrok.tgz", "-C", "/usr/local/bin"], check=True)
+        except Exception as e:
+            print(f"⚠️ ngrok インストール失敗: {e}")
+            return
+
+    try:
+        proc = subprocess.Popen(
+            [ngrok_bin, "http", "127.0.0.1:7860", "--url", f"https://{domain}",
+             "--authtoken", authtoken, "--log", "stdout", "--log-format", "logfmt"],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=True
+        )
+        for line in proc.stdout:
+            if "started tunnel" in line:
+                print("\n" + "=" * 60)
+                print(f"⚡ 【ngrok 固定トンネル起動完了】: https://{domain}")
+                print("（URLは毎回同じなので、ローカル側の設定変更は不要です）")
+                print("=" * 60 + "\n", flush=True)
+            elif "lvl=eror" in line or "ERR_NGROK" in line:
+                print(f"⚠️ ngrok エラー: {line.strip()}", flush=True)
+    except Exception as e:
+        print(f"⚠️ ngrok 起動失敗: {e}")
+
+# ノートブック側で NGROK_AUTHTOKEN / NGROK_DOMAIN が設定されていれば固定URLの ngrok、なければ従来の Cloudflare
+NGROK_AUTHTOKEN = os.environ.get("NGROK_AUTHTOKEN", "").strip()
+NGROK_DOMAIN = os.environ.get("NGROK_DOMAIN", "").strip().removeprefix("https://").rstrip("/")
+if NGROK_AUTHTOKEN and NGROK_DOMAIN:
+    threading.Thread(target=ngrok_tunnel_worker, args=(NGROK_AUTHTOKEN, NGROK_DOMAIN), daemon=True).start()
+else:
+    threading.Thread(target=cloudflare_tunnel_worker, daemon=True).start()
 
 def sync_url_worker():
     sync_endpoints = [
