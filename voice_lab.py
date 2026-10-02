@@ -243,6 +243,9 @@ def run_job(model, epochs, aivis_url):
     """学習プロセスの本体（python voice_lab.py train ... で別プロセスとして実行される）"""
     # ノートブックが設定する MPLBACKEND（matplotlib_inline）は専用環境では無効な値で、pyannote の import が失敗する
     os.environ["MPLBACKEND"] = "Agg"
+    # torch 2.6 以降は torch.load が既定で weights_only=True になり、pyannote 公式の話者埋め込みモデル
+    # （Hugging Face の pyannote/wespeaker-voxceleb-resnet34-LM）の読み込みが拒否される。配布元が信頼できるので解除
+    os.environ["TORCH_FORCE_NO_WEIGHTS_ONLY_LOAD"] = "1"
     job.update(state="running", model=model, started=time.time(), elapsed=None, step=None, total_steps=None)
     _save_status()
     try:
