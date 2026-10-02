@@ -114,10 +114,14 @@ else:
 from gradio_tabs.train import preprocess_all
 from style_bert_vits2.nlp.japanese import pyopenjtalk_worker
 pyopenjtalk_worker.initialize_worker()
-preprocess_all(model_name="{model}", batch_size={batch}, epochs={epochs}, save_every_steps={save_every},
+result = preprocess_all(model_name="{model}", batch_size={batch}, epochs={epochs}, save_every_steps={save_every},
                num_processes=2, normalize=False, trim=False, freeze_EN_bert=False, freeze_JP_bert=False,
                freeze_ZH_bert=False, freeze_style=False, freeze_decoder=False, use_jp_extra=True,
                val_per_lang=0, log_interval=50, yomi_error="skip")
+# preprocess_all は途中の段階で失敗しても例外を出さず (False, メッセージ) を返すだけなので、ここで止める
+print("PREPROCESS_RESULT:", result, flush=True)
+if isinstance(result, tuple) and not result[0]:
+    raise SystemExit("前処理に失敗: " + str(result[1])[-3000:])
 '''
 
 
