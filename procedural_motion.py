@@ -171,10 +171,14 @@ def save_procedural_motion_template(
     motion_type="idle",
     duration_sec=8.0,
     fps=25,
-    emotion=None
+    emotion=None,
+    wrap_pad_frames=0
 ):
     """
     指定パスに LivePortrait 互換 .pkl モーションテンプレートを出力保存
+
+    wrap_pad_frames: ループ用。前後に周期的な続きのコマを足す（LivePortrait の平滑化が端で途切れて
+        ループの継ぎ目が飛ぶのを防ぐ）。生成後の動画から前後この数のコマを切り落として使う。
     """
     template_dct = generate_procedural_motion(
         motion_type=motion_type,
@@ -182,6 +186,12 @@ def save_procedural_motion_template(
         fps=fps,
         emotion=emotion
     )
+    p = wrap_pad_frames
+    if p > 0:
+        for key in ("motion", "c_eyes_lst", "c_lip_lst"):
+            lst = template_dct[key]
+            template_dct[key] = lst[-p:] + lst + lst[:p]
+        template_dct["n_frames"] += 2 * p
     os.makedirs(os.path.dirname(os.path.abspath(output_pkl_path)), exist_ok=True)
     with open(output_pkl_path, "wb") as f:
         pickle.dump(template_dct, f, protocol=pickle.HIGHEST_PROTOCOL)

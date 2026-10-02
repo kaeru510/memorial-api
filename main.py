@@ -640,13 +640,16 @@ async def upload_avatar(file: UploadFile = File(...)):
                     direct_url,
                     files={"image": ("face.jpg", f, "image/jpeg")},
                     headers=TUNNEL_HEADERS,
-                    timeout=300  # 32秒ループの LivePortrait 生成＋顔検出で1〜2分かかる
+                    timeout=900  # 32秒ループの LivePortrait 生成＋顔検出で T4 だと約8分かかる
                 )
             if res.ok and len(res.content) > 1000:
                 with open(dest_idle_path, "wb") as out_f:
                     out_f.write(res.content)
                 setup_success = True
                 print(f"🎉 [アバター更新完了 (ダイレクト)] ({time.time() - t0:.2f}秒): {dest_idle_path}")
+        except requests.exceptions.ReadTimeout:
+            # Colab 側では生成が続いている。フォールバックすると同じ生成を二重に始めてしまうため中断
+            raise HTTPException(status_code=504, detail="アバター生成が時間内に終わりませんでした。Colab 側で処理が続いている可能性があるので、数分後にページを再読み込みしてください。")
         except Exception as dir_err:
             print(f"ℹ️ ダイレクトアバター更新待機/フォールバック: {dir_err}")
 

@@ -267,11 +267,13 @@ def setup_avatar(face_img_path):
 
         # 8 の倍数秒にすると全周期が揃い、そのまま繰り返すだけで継ぎ目のないループになる
         duration = 8.0 if device == 'cpu' else 32.0
+        loop_pad = 25  # 前後1秒の余白（LivePortrait の平滑化の端の影響を切り落とす）
         save_procedural_motion_template(
             procedural_pkl,
             motion_type="idle",
             duration_sec=duration,
-            fps=25
+            fps=25,
+            wrap_pad_frames=loop_pad
         )
 
         lp_output_dir = os.path.join(LIVEPORTRAIT_DIR, "animations")
@@ -340,6 +342,9 @@ def setup_avatar(face_img_path):
         if not raw_frames:
             raise RuntimeError("LivePortrait動画の読み込みに失敗しました。")
 
+        expected = int(duration * 25)
+        if len(raw_frames) >= expected + 2 * loop_pad:
+            raw_frames = raw_frames[loop_pad:loop_pad + expected]
         total_frames = len(raw_frames)
         print(f"🚀 [2/4] {total_frames / fps:.0f}秒のループ動画を作成中 ({total_frames}フレーム)...", flush=True)
 
@@ -385,7 +390,8 @@ def setup_avatar(face_img_path):
 
         # 4. メモリ内キャッシュを即座に再読み込み
         print("🚀 [4/4] サーバーメモリのキャッシュを最新アバターに更新...", flush=True)
-        reload_avatar_cache(BASE_LOOP_VIDEO, CACHE_FILE)
+        with gpu_lock:  # 会話の口パク合成中にキャッシュを差し替えないよう、合成の合間に切り替える
+            reload_avatar_cache(BASE_LOOP_VIDEO, CACHE_FILE)
 
         # 5. ブラウザ待機用の avatar_idle.mp4 を口パク動画と同じ画質で生成（切り替え時の見た目を一致させる）
         avatar_idle_path = make_idle_video("/content/avatar_idle.mp4")
@@ -791,17 +797,22 @@ def api_generate_from_text(
             except Exception:
                 pass
 
+# 重い処理の窓口は async にしない（async 内で重い処理を直接実行すると、終わるまで
+# サーバー全体が他のリクエストに応答しなくなる。通常の def なら別スレッドで実行される）
 @api_app.post("/api/generate")
-async def api_generate(audio: UploadFile = File(...), start_frame: int = Form(0)):
+def api_generate(audio: UploadFile = File(...), start_frame: int = Form(0)):
     t0 = time.time()
     temp_wav = f"/content/req_{int(time.time() * 1000)}.wav"
-    content = await audio.read()
     with open(temp_wav, "wb") as f:
-        f.write(content)
+        f.write(audio.file.read())
     try:
-        mp4_path = fast_process_pipeline(None, temp_wav, start_frame)
+        out_mp4 = temp_wav.replace(".wav", ".mp4")
+        with gpu_lock:
+            mp4_path = fast_process_pipeline(None, temp_wav, start_frame, out_mp4)
         print(f"⚡ [ダイレクトAPI動画生成完了] ({time.time() - t0:.2f}秒)", flush=True)
-        return FileResponse(mp4_path, media_type="video/mp4", filename="final_output.mp4")
+        from starlette.background import BackgroundTask
+        return FileResponse(mp4_path, media_type="video/mp4", filename="final_output.mp4",
+                            background=BackgroundTask(lambda: os.path.exists(mp4_path) and os.remove(mp4_path)))
     finally:
         if os.path.exists(temp_wav):
             try:
@@ -810,12 +821,11 @@ async def api_generate(audio: UploadFile = File(...), start_frame: int = Form(0)
                 pass
 
 @api_app.post("/api/setup_avatar")
-async def api_setup_avatar(image: UploadFile = File(...)):
+def api_setup_avatar(image: UploadFile = File(...)):
     t0 = time.time()
     temp_img = f"/content/face_{int(time.time() * 1000)}.jpg"
-    content = await image.read()
     with open(temp_img, "wb") as f:
-        f.write(content)
+        f.write(image.file.read())
     try:
         idle_path = setup_avatar(temp_img)
         print(f"🎉 [ダイレクトAPIアバター更新完了] ({time.time() - t0:.2f}秒)", flush=True)
