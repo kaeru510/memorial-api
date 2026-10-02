@@ -125,7 +125,6 @@ except Exception as e:
     print("⚠️ ウォームアップスキップ:", e)
 
 SYNC_ENDPOINTS = [
-    "https://kvdb.io/A5pQ8K3wKqR2fP4s9Yx7Nz/colab_url",
     "https://api.cl1p.net/kaeru510-memorial"
 ]
 CACHE_URL_FILE = os.path.join(BASE_DIR, "colab_url.txt")
@@ -641,7 +640,7 @@ async def upload_avatar(file: UploadFile = File(...)):
                     direct_url,
                     files={"image": ("face.jpg", f, "image/jpeg")},
                     headers=TUNNEL_HEADERS,
-                    timeout=90
+                    timeout=300  # 32秒ループの LivePortrait 生成＋顔検出で1〜2分かかる
                 )
             if res.ok and len(res.content) > 1000:
                 with open(dest_idle_path, "wb") as out_f:

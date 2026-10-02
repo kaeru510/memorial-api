@@ -511,7 +511,7 @@
     setControlsDisabled(true);
     statusDot.className = "status-dot thinking";
     statusText.innerText = "アバター生成中...";
-    subtitle.innerText = "💡 新しい写真からループ動画とキャッシュを生成中（約15〜20秒）...";
+    subtitle.innerText = "💡 新しい写真からループ動画とキャッシュを生成中（約1〜2分）...";
 
     try {
       const response = await fetch("/upload_avatar", {

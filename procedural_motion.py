@@ -54,7 +54,7 @@ def generate_procedural_motion(
 
     Parameters:
         motion_type: "idle", "nod", "happy", "curious"
-        duration_sec: アニメーションの秒数（idle の場合は 8.0s 推奨: 整数周期で完全シームレスループ）
+        duration_sec: アニメーションの秒数（idle は 8 の倍数を推奨: 呼吸4秒・ゆらぎ8秒の整数周期で完全シームレスループ）
         fps: フレームレート (25)
         emotion: オプションの感情名 ("happy", "nod", "curious", "normal")
     Returns:
@@ -77,6 +77,12 @@ def generate_procedural_motion(
     pitch = 0.6 * np.cos(2.0 * np.pi * f_breath * t)
     yaw = 0.9 * np.sin(2.0 * np.pi * f_sway * t)
     roll = 0.5 * np.sin(2.0 * np.pi * f_breath * t + 0.5)
+
+    # ループ全体で1周・2周する遅いゆらぎを重ね、8秒ごとの同じ動きの繰り返し感を減らす
+    # （周期がループ長の整数分の1なので、始点と終点は一致したまま）
+    f_slow = 1.0 / duration_sec
+    yaw += 0.6 * np.sin(2.0 * np.pi * f_slow * t)
+    pitch += 0.3 * np.sin(2.0 * np.pi * 2 * f_slow * t + 1.0)
 
     # 2. 感情・アクションのオーバーレイ
     effective_motion = emotion if emotion else motion_type
@@ -106,16 +112,17 @@ def generate_procedural_motion(
     # 開眼時: 0.38, 閉眼時: 0.03
     eye_ratio = np.full(n_frames, 0.38, dtype=np.float32)
 
-    # 8秒間に2回の自然な瞬きを配置 (t=2.4s, t=5.8s)
-    blink_times = [2.4, 5.8]
-    for b_time in blink_times:
+    # まばたきは 2.5〜5.5秒の不規則な間隔で配置（人は毎分15〜20回程度、等間隔だと機械的に見える）
+    # 形: 2コマで閉じ → 1コマ閉眼 → 3コマで開く（約240ms。閉じる方が開くより速い）
+    blink_shape = [0.26, 0.10, 0.04, 0.12, 0.24, 0.33]
+    rng = np.random.default_rng(7)  # 毎回同じループになるよう固定シード
+    b_time = 1.2
+    while True:
         b_idx = int(b_time * fps)
-        # まばたき持続フレーム: 4フレーム（約160ms）
-        if b_idx + 4 < n_frames:
-            eye_ratio[b_idx] = 0.22
-            eye_ratio[b_idx + 1] = 0.04  # 完全閉眼
-            eye_ratio[b_idx + 2] = 0.15
-            eye_ratio[b_idx + 3] = 0.32
+        if b_idx + len(blink_shape) >= n_frames:  # ループの継ぎ目をまたがない
+            break
+        eye_ratio[b_idx:b_idx + len(blink_shape)] = blink_shape
+        b_time += rng.uniform(2.5, 5.5)
 
     # 4. モーションフレーム辞書リストの構築
     motion_list = []

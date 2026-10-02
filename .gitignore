@@ -38,3 +38,6 @@ Thumbs.db
 .env
 # Colab 起動用ノートブック（ngrok の authtoken を含むため公開しない）
 colab_start.ipynb
+
+# Colab URL のローカルキャッシュ（ngrok 固定URL運用では未使用）
+colab_url.txt

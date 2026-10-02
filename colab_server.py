@@ -226,7 +226,8 @@ def setup_avatar(face_img_path):
             sys.path.append("/content/memorial-api")
             from procedural_motion import save_procedural_motion_template
 
-        duration = 4.0 if device == 'cpu' else 8.0
+        # 8 の倍数秒にすると全周期が揃い、そのまま繰り返すだけで継ぎ目のないループになる
+        duration = 8.0 if device == 'cpu' else 32.0
         save_procedural_motion_template(
             procedural_pkl,
             motion_type="idle",
@@ -282,8 +283,7 @@ def setup_avatar(face_img_path):
         print(f"✅ LivePortrait 生成完了: {latest_lp}", flush=True)
 
 
-        # 2. ピンポンループ動画の作成（CPU時は6秒、GPU時は30秒）
-        loop_duration = 6.0 if device == 'cpu' else 30.0
+        # 2. ループ動画の作成（モーションが周期的なので往復させず順再生で継ぎ目なくつながる）
         BASE_LOOP_VIDEO = "/content/base_avatar_loop.mp4"
         cap = cv2.VideoCapture(latest_lp)
         fps = cap.get(cv2.CAP_PROP_FPS) or 25.0
@@ -301,15 +301,13 @@ def setup_avatar(face_img_path):
         if not raw_frames:
             raise RuntimeError("LivePortrait動画の読み込みに失敗しました。")
 
-        pingpong_cycle = raw_frames + raw_frames[-2:0:-1] if len(raw_frames) > 1 else raw_frames
-        total_frames = int(loop_duration * fps)
-        print(f"🚀 [2/4] {loop_duration}秒の往復ループ動画を作成中 ({total_frames}フレーム)...", flush=True)
+        total_frames = len(raw_frames)
+        print(f"🚀 [2/4] {total_frames / fps:.0f}秒のループ動画を作成中 ({total_frames}フレーム)...", flush=True)
 
         fourcc = cv2.VideoWriter_fourcc(*'mp4v')
         out = cv2.VideoWriter(BASE_LOOP_VIDEO, fourcc, fps, (width, height))
         loop_frames = []
-        for i in range(total_frames):
-            f = pingpong_cycle[i % len(pingpong_cycle)]
+        for f in raw_frames:
             out.write(f)
             loop_frames.append(f)
         out.release()
@@ -350,28 +348,16 @@ def setup_avatar(face_img_path):
         print("🚀 [4/4] サーバーメモリのキャッシュを最新アバターに更新...", flush=True)
         reload_avatar_cache(BASE_LOOP_VIDEO, CACHE_FILE)
 
-        # 5. ブラウザ待機用の軽量 avatar_idle.mp4 を生成
-        avatar_idle_path = "/content/avatar_idle.mp4"
-        max_dim = 480
-        scale = min(max_dim / max(height, width), 1.0)
-        target_w = int(width * scale) // 2 * 2
-        target_h = int(height * scale) // 2 * 2
+        # 5. ブラウザ待機用の avatar_idle.mp4 を口パク動画と同じ画質で生成（切り替え時の見た目を一致させる）
+        avatar_idle_path = make_idle_video("/content/avatar_idle.mp4")
 
-        cmd = [
-            "ffmpeg", "-y",
-            "-i", BASE_LOOP_VIDEO,
-            "-vf", f"scale={target_w}:{target_h}",
-            "-c:v", "libx264",
-            "-preset", "ultrafast",
-            "-crf", "26",
-            "-pix_fmt", "yuv420p",
-            "-an",
-            avatar_idle_path
-        ]
-        subprocess.run(cmd, check=True)
-
-        # Google Drive にもバックアップ保存
+        # Google Drive にもバックアップ保存（前のアバターは *_prev として1世代残す）
         try:
+            for name in ("base_avatar_loop.mp4", "base_avatar_cache.npz", "avatar_idle.mp4"):
+                src = f"{DRIVE_DIR}/{name}"
+                if os.path.exists(src):
+                    base, ext = os.path.splitext(src)
+                    shutil.copy(src, f"{base}_prev{ext}")
             shutil.copy(BASE_LOOP_VIDEO, f"{DRIVE_DIR}/base_avatar_loop.mp4")
             shutil.copy(CACHE_FILE, f"{DRIVE_DIR}/base_avatar_cache.npz")
             shutil.copy(avatar_idle_path, f"{DRIVE_DIR}/avatar_idle.mp4")
@@ -456,6 +442,15 @@ def mouth_blend_mask(h, w):
         _mouth_mask_cache[key] = m[..., None]
     return _mouth_mask_cache[key]
 
+def count_video_frames(audio_path):
+    """fast_process_pipeline がこの音声から作る動画のコマ数（区間をつなぐ開始コマの計算用。下と同じ数え方）"""
+    mel_len = max(audio.melspectrogram(audio.load_wav(audio_path, 16000)).shape[1], 16)
+    mel_idx_multiplier = 80.0 / cached_fps
+    i = 0
+    while int(i * mel_idx_multiplier) + 16 <= mel_len:
+        i += 1
+    return i + 1
+
 def fast_process_pipeline(face_img_path, audio_path, start_frame=0, out_path="/content/final_synced_output.mp4"):
     """start_frame: ループ動画の何コマ目から合成を始めるか（区間をまたいで頭の動きを連続させる）"""
     t_start = time.time()
@@ -496,7 +491,7 @@ def fast_process_pipeline(face_img_path, audio_path, start_frame=0, out_path="/c
         mel_tensor = torch.FloatTensor(np.array(batch_mels)).unsqueeze(1).to(device)
 
         with torch.no_grad():
-            with torch.cuda.amp.autocast(enabled=(device == 'cuda')):
+            with torch.amp.autocast('cuda', enabled=(device == 'cuda')):
                 pred = model(mel_tensor, img_tensor)
 
         pred = pred.float().cpu().numpy().transpose(0, 2, 3, 1) * 255.0
@@ -730,7 +725,7 @@ def api_generate_from_text(
             try:
                 duration = synth_to_file()
                 my_start = st["next_frame"]
-                st["next_frame"] = my_start + int(round(duration * cached_fps))
+                st["next_frame"] = my_start + count_video_frames(temp_wav)
             finally:
                 st["next_index"] = max(st["next_index"], seg_index + 1)
                 st["cond"].notify_all()
@@ -829,7 +824,6 @@ def cloudflare_tunnel_worker():
                     print("（超低遅延な日本国内エッジサーバー経由で高速通信します）")
                     print("=" * 60 + "\n", flush=True)
                     sync_endpoints = [
-                        "https://kvdb.io/A5pQ8K3wKqR2fP4s9Yx7Nz/colab_url",
                         "https://api.cl1p.net/kaeru510-memorial"
                     ]
                     for ep in sync_endpoints:
@@ -886,7 +880,6 @@ else:
 
 def sync_url_worker():
     sync_endpoints = [
-        "https://kvdb.io/A5pQ8K3wKqR2fP4s9Yx7Nz/colab_url",
         "https://api.cl1p.net/kaeru510-memorial"
     ]
     print("📡 URL自動同期ワーカー開始...")
