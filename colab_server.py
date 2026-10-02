@@ -250,10 +250,11 @@ def precompute_face_tensor(frames, coords):
 import json
 EMOTION_NAMES = ("happy", "calm", "sad")
 # 目を細める等も表情キーポイント（expression の eyes）で指定する（eye_open は目の調整機能を使う場合のみ有効）
+# 値は 2026-10-03 に試し撮り（/api/expression_preview）で調整したもの
 DEFAULT_EMOTION_PRESETS = {
-    "happy": {"expression": {"smile": 0.9, "eyebrow": 3.0}},
-    "calm": {"expression": {"smile": 0.35}},
-    "sad": {"expression": {"smile": -0.3, "eyebrow": -6.0}},
+    "happy": {"expression": {"smile": 0.9, "eyebrow": 3.0, "eyes": -3.0}},   # 笑顔＋目を少し細める
+    "calm": {"expression": {"smile": 0.4, "eyes": -2.0}},                    # 控えめな微笑み
+    "sad": {"expression": {"smile": -0.45, "eyebrow": -8.0, "eyes": -6.0}},  # 伏し目＋口角を少し下げる（強いとすねた顔に見える）
 }
 EMOTION_PRESETS_FILE = f"{DRIVE_DIR}/emotion_presets.json"
 emotion_presets = dict(DEFAULT_EMOTION_PRESETS)
