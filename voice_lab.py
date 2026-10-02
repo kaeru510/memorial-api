@@ -155,6 +155,12 @@ def train(model, epochs=100, batch=4, save_every=500, install_fn=None):
         os.environ["PATH"] = "/root/.local/bin:/root/.cargo/bin:" + os.environ["PATH"]
         _run(["uv", "pip", "install", "-q", "--python", SBV2_PY] + missing)
 
+    # 前処理の BERT 特徴で使う DebertaV2Model が読み込めるかを先に確かめる（失敗すると前処理が全文を黙って捨てる）
+    chk = subprocess.run([SBV2_PY, "-c", "from transformers.models.deberta_v2 import modeling_deberta_v2"],
+                         capture_output=True, text=True)
+    if chk.returncode != 0:
+        raise RuntimeError("transformers の DebertaV2 が読み込めません:\n" + chk.stderr[-2500:])
+
     resumed = bool(glob.glob(f"{data_dir}/models/G_*.pth"))
     if not resumed:
         _log(f"前処理中（{n_utt} 文、テキスト解析・BERT 特徴・スタイル）...")
