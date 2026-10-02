@@ -479,6 +479,57 @@ def render_segment(index, wav_future, clock):
     with open(mp4_path, "rb") as f:
         return f.read()
 
+# ----------------------------------------------------
+# Colab GPU 音声合成（使えるときはテキストだけ送り、音声合成＋口パクを Colab で一括実行）
+# ----------------------------------------------------
+colab_tts_ready = False
+remote_sec_ema = 1.0      # テキスト→動画（Colab 一括）の所要秒数の移動平均
+
+def poll_colab_tts():
+    """Colab 側の GPU 音声合成の準備状況を定期確認（未準備・失敗時はローカルの CPU 合成を使う）"""
+    global colab_tts_ready
+    last_detail = None
+    while True:
+        try:
+            res = requests.get(f"{fetch_latest_colab_url()}/api/tts_status", headers=TUNNEL_HEADERS, timeout=5)
+            data = res.json() if res.ok else {}
+            ready = bool(data.get("ready"))
+            detail = data.get("detail", f"HTTP {res.status_code}")
+        except Exception as e:
+            ready, detail = False, f"接続不可: {type(e).__name__}"
+        if ready != colab_tts_ready or detail != last_detail:
+            print(f"🗣️ Colab GPU 音声合成: {'使用中' if ready else '未使用'} ({detail})")
+        colab_tts_ready, last_detail = ready, detail
+        time.sleep(15)
+
+threading.Thread(target=poll_colab_tts, daemon=True).start()
+
+def render_segment_remote(index, text, clock):
+    """Colab でテキスト→音声→口パク動画を一括生成。失敗時はローカル CPU 合成にフォールバック"""
+    global remote_sec_ema
+    now = time.time()
+    play_at = max(now + remote_sec_ema, clock["prev_end"])
+    start_frame = round((clock["idle_time"] + (play_at - clock["t_send"])) * IDLE_FPS) % IDLE_TOTAL_FRAMES
+    try:
+        res = requests.post(
+            f"{fetch_latest_colab_url()}/api/generate_from_text",
+            data={"text": text, "speaker": str(SPEAKER_ID), "speed": "1.22",
+                  "pre_silence": str(SEG_SILENCE), "post_silence": str(SEG_SILENCE),
+                  "start_frame": str(start_frame)},
+            headers=TUNNEL_HEADERS,
+            timeout=20
+        )
+        res.raise_for_status()
+        clock["prev_end"] = play_at + float(res.headers.get("X-Audio-Duration", "1.0"))
+        elapsed = time.time() - now
+        remote_sec_ema = 0.7 * remote_sec_ema + 0.3 * elapsed
+        print(f"🎬 [区間{index + 1} Colab一括生成] ({elapsed:.2f}秒, うちGPU合成 {res.headers.get('X-TTS-Sec', '?')}秒)")
+        return res.content
+    except Exception as e:
+        print(f"ℹ️ Colab GPU 合成に失敗、ローカル合成へ切り替え: {e}")
+        wav_future = tts_executor.submit(synthesize_speech, text, 30, SEG_SILENCE, SEG_SILENCE)
+        return render_segment(index, wav_future, clock)
+
 @app.post("/chat_stream")
 def chat_stream(req: ChatStreamRequest):
     t_send = time.time()
@@ -494,8 +545,11 @@ def chat_stream(req: ChatStreamRequest):
         try:
             for i, (emotion, seg) in enumerate(iter_reply_segments(req.message)):
                 print(f"🤖 [区間{i + 1} ({emotion})] ({time.time() - total_start:.2f}秒): {seg}")
-                wav_future = tts_executor.submit(synthesize_speech, seg, 30, SEG_SILENCE, SEG_SILENCE)
-                video_future = video_executor.submit(render_segment, i, wav_future, clock)
+                if colab_tts_ready:
+                    video_future = video_executor.submit(render_segment_remote, i, seg, clock)
+                else:
+                    wav_future = tts_executor.submit(synthesize_speech, seg, 30, SEG_SILENCE, SEG_SILENCE)
+                    video_future = video_executor.submit(render_segment, i, wav_future, clock)
                 jobs.append((emotion, seg, video_future))
 
             for i, (emotion, seg, video_future) in enumerate(jobs):

@@ -554,6 +554,94 @@ with gr.Blocks() as demo:
         )
 
 # ==============================================================================
+# 6.2. AivisSpeech Engine を Colab GPU で起動（音声合成もGPU化し、ローカルCPUの約1.5秒を短縮）
+#      失敗してもサーバー本体には影響せず、ローカル側は従来どおり自前の AivisSpeech を使う
+# ==============================================================================
+import glob
+import threading
+import requests
+
+AIVIS_DIR = "/content/AivisSpeech-Engine"
+AIVIS_PORT = 10101
+AIVIS_LOCAL_URL = f"http://127.0.0.1:{AIVIS_PORT}"
+AIVIS_LOG = "/content/aivis_engine.log"
+# ローカルで使っているモデル（コハク）。AivisHub から直接ダウンロードする
+AIVIS_MODEL_UUIDS = os.environ.get("AIVIS_MODEL_UUIDS", "22e8ed77-94fe-4ef2-871f-a86f94e9a579").split(",")
+AIVIS_WARM_SPEAKER = int(os.environ.get("AIVIS_WARM_SPEAKER", "888753760"))
+aivis_state = {"ready": False, "detail": "未起動", "warm_synth_sec": None}
+
+def aivis_setup_worker():
+    def step(msg):
+        aivis_state["detail"] = msg
+        print(f"🗣️ [GPU音声合成] {msg}", flush=True)
+    try:
+        t0 = time.time()
+        step("uv をインストール中...")
+        subprocess.run(["pip", "install", "-q", "uv"], check=True)
+        if not os.path.exists(AIVIS_DIR):
+            step("AivisSpeech Engine を取得中...")
+            subprocess.run(["git", "clone", "-q", "--depth", "1",
+                            "https://github.com/Aivis-Project/AivisSpeech-Engine.git", AIVIS_DIR], check=True)
+        step("依存ライブラリをインストール中（Python 3.11 環境を作成）...")
+        subprocess.run(["uv", "sync", "--no-default-groups", "-q"], cwd=AIVIS_DIR, check=True)
+
+        # モデル配置（ソース実行時の保存先は AivisSpeech-Engine-Dev）
+        for app_name in ("AivisSpeech-Engine-Dev", "AivisSpeech-Engine"):
+            model_dir = os.path.expanduser(f"~/.local/share/{app_name}/Models")
+            os.makedirs(model_dir, exist_ok=True)
+            for uuid in AIVIS_MODEL_UUIDS:
+                dest = os.path.join(model_dir, f"{uuid.strip()}.aivmx")
+                if not os.path.exists(dest):
+                    step(f"音声モデルをダウンロード中 ({uuid.strip()[:8]})...")
+                    subprocess.run(["curl", "-sL", "-o", dest,
+                                    f"https://api.aivis-project.com/v1/aivm-models/{uuid.strip()}/download?model_type=AIVMX"], check=True)
+
+        # onnxruntime-gpu が CUDA/cuDNN を見つけられるよう、Colab の torch 同梱 NVIDIA ライブラリを渡す
+        env = os.environ.copy()
+        nv_libs = glob.glob("/usr/local/lib/python3*/dist-packages/nvidia/*/lib")
+        env["LD_LIBRARY_PATH"] = ":".join(nv_libs + [env.get("LD_LIBRARY_PATH", "")])
+        step("エンジン起動中（初回は BERT モデル約650MBのダウンロードあり）...")
+        log = open(AIVIS_LOG, "w")
+        subprocess.Popen([os.path.join(AIVIS_DIR, ".venv/bin/python"), "run.py", "--use_gpu",
+                          "--host", "127.0.0.1", "--port", str(AIVIS_PORT)],
+                         cwd=AIVIS_DIR, env=env, stdout=log, stderr=subprocess.STDOUT)
+
+        for _ in range(300):
+            try:
+                if requests.get(f"{AIVIS_LOCAL_URL}/version", timeout=2).ok:
+                    break
+            except Exception:
+                pass
+            time.sleep(2)
+        else:
+            raise RuntimeError(f"エンジンが起動しませんでした（ログ: {AIVIS_LOG}）")
+
+        # ウォームアップ（初回合成はモデル読み込みを含むため2回測る）
+        for _ in range(2):
+            ts = time.time()
+            aivis_synthesize("こんにちは、よろしくね。", AIVIS_WARM_SPEAKER)
+            warm = time.time() - ts
+        aivis_state["warm_synth_sec"] = round(warm, 3)
+        aivis_state["ready"] = True
+        step(f"準備完了（起動 {time.time() - t0:.0f}秒, 合成 {warm:.2f}秒/文）")
+    except Exception as e:
+        aivis_state["ready"] = False
+        step(f"起動失敗（ローカルのCPU合成を使います）: {e}")
+
+def aivis_synthesize(text, speaker, speed=1.22, pre=None, post=None):
+    q = requests.post(f"{AIVIS_LOCAL_URL}/audio_query", params={"text": text, "speaker": speaker}, timeout=10)
+    q.raise_for_status()
+    query = q.json()
+    query["speedScale"] = speed
+    if pre is not None:
+        query["prePhonemeLength"] = pre
+    if post is not None:
+        query["postPhonemeLength"] = post
+    s = requests.post(f"{AIVIS_LOCAL_URL}/synthesis", params={"speaker": speaker}, json=query, timeout=30)
+    s.raise_for_status()
+    return s.content
+
+# ==============================================================================
 # 6.5. ダイレクト超高速 API (FastAPI 直結ルート) の登録
 # ==============================================================================
 from fastapi import FastAPI, UploadFile, File, Form
@@ -571,6 +659,46 @@ def api_idle_video():
         path, media_type="video/mp4", filename="avatar_idle.mp4",
         headers={"X-Total-Frames": str(len(cached_frames)), "X-FPS": str(cached_fps)}
     )
+
+@api_app.get("/api/tts_status")
+def api_tts_status():
+    return aivis_state
+
+@api_app.post("/api/generate_from_text")
+def api_generate_from_text(
+    text: str = Form(...),
+    speaker: int = Form(AIVIS_WARM_SPEAKER),
+    speed: float = Form(1.22),
+    pre_silence: float = Form(0.05),
+    post_silence: float = Form(0.05),
+    start_frame: int = Form(0),
+):
+    """テキスト → GPU音声合成 → 口パク動画 を Colab 内で一括実行（音声のアップロード往復も不要）"""
+    if not aivis_state["ready"]:
+        from fastapi import HTTPException
+        raise HTTPException(status_code=503, detail=f"GPU音声合成は未準備: {aivis_state['detail']}")
+    t0 = time.time()
+    wav_bytes = aivis_synthesize(text, speaker, speed, pre_silence, post_silence)
+    tts_sec = time.time() - t0
+    temp_wav = f"/content/req_{int(time.time() * 1000)}.wav"
+    with open(temp_wav, "wb") as f:
+        f.write(wav_bytes)
+    try:
+        import wave as _wave
+        with _wave.open(temp_wav) as w:
+            duration = w.getnframes() / w.getframerate()
+        mp4_path = fast_process_pipeline(None, temp_wav, start_frame)
+        print(f"⚡ [テキスト→動画 完了] 合成 {tts_sec:.2f}秒 | 合計 {time.time() - t0:.2f}秒: {text}", flush=True)
+        return FileResponse(
+            mp4_path, media_type="video/mp4", filename="final_output.mp4",
+            headers={"X-Audio-Duration": f"{duration:.3f}", "X-TTS-Sec": f"{tts_sec:.3f}"}
+        )
+    finally:
+        if os.path.exists(temp_wav):
+            try:
+                os.remove(temp_wav)
+            except Exception:
+                pass
 
 @api_app.post("/api/generate")
 async def api_generate(audio: UploadFile = File(...), start_frame: int = Form(0)):
@@ -722,6 +850,9 @@ def sync_url_worker():
             break
         else:
             time.sleep(1)
+
+if os.environ.get("AIVIS_ON_COLAB", "1") == "1":
+    threading.Thread(target=aivis_setup_worker, daemon=True).start()
 
 if NGROK_AUTHTOKEN and NGROK_DOMAIN:
     # 固定URL運用: ダイレクトAPI(/api/*) と Gradio(/) を同じポート 7860 で提供（gradio.live 共有リンクは不要）
