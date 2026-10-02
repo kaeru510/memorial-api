@@ -440,6 +440,22 @@ def make_idle_video(out_path="/content/idle_for_browser.mp4"):
     encode_frames_to_mp4(cached_frames, out_path)
     return out_path
 
+_mouth_mask_cache = {}
+
+def mouth_blend_mask(h, w):
+    """顔ボックス内で口まわりだけを 1、目元より上を 0 とし、境目と左右・下端をぼかしたマスク (h, w, 1)"""
+    key = (h, w)
+    if key not in _mouth_mask_cache:
+        m = np.zeros((h, w), np.float32)
+        m[int(h * 0.55):, :] = 1.0  # 鼻の下あたりから下（Wav2Lip が生成するのは顔の下半分）
+        m = cv2.GaussianBlur(m, (0, 0), sigmaX=max(w * 0.06, 1), sigmaY=max(h * 0.06, 1))
+        # ボックスの左右・下端は元の顔へ徐々に戻して貼り付けの継ぎ目を消す
+        xs = np.minimum(np.arange(w), np.arange(w)[::-1]) / max(w * 0.08, 1)
+        ys = np.arange(h)[::-1] / max(h * 0.04, 1)
+        m *= np.clip(xs, 0, 1)[None, :] * np.clip(ys, 0, 1)[:, None]
+        _mouth_mask_cache[key] = m[..., None]
+    return _mouth_mask_cache[key]
+
 def fast_process_pipeline(face_img_path, audio_path, start_frame=0, out_path="/content/final_synced_output.mp4"):
     """start_frame: ループ動画の何コマ目から合成を始めるか（区間をまたいで頭の動きを連続させる）"""
     t_start = time.time()
@@ -488,7 +504,10 @@ def fast_process_pipeline(face_img_path, audio_path, start_frame=0, out_path="/c
         for j, (p, (y1, y2, x1, x2)) in enumerate(zip(pred, batch_c)):
             idx = i + j
             p = cv2.resize(p.astype(np.uint8), (x2 - x1, y2 - y1))
-            full_frames[idx][y1:y2, x1:x2] = p
+            # 顔全体を貼ると 96px 由来のボケで目元まで変わるため、口まわり（下半分）だけをなじませて合成
+            m = mouth_blend_mask(y2 - y1, x2 - x1)
+            orig = full_frames[idx][y1:y2, x1:x2].astype(np.float32)
+            full_frames[idx][y1:y2, x1:x2] = (p.astype(np.float32) * m + orig * (1.0 - m)).astype(np.uint8)
 
     gpu_sec = time.time() - t_gpu
 
