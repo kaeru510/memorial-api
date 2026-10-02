@@ -645,6 +645,10 @@ def ngrok_tunnel_worker(authtoken, domain):
             print(f"⚠️ ngrok インストール失敗: {e}")
             return
 
+    # セルを止めて再実行した場合に前回の ngrok が残っていると固定ドメインが使用中で失敗するため片付ける
+    subprocess.run(["pkill", "-f", "ngrok http"], check=False)
+    time.sleep(1)
+
     try:
         proc = subprocess.Popen(
             [ngrok_bin, "http", "127.0.0.1:7860", "--url", f"https://{domain}",
