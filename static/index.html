@@ -47,7 +47,7 @@
       z-index: 2;
       opacity: 0;
       pointer-events: none;
-      transition: opacity 0.2s ease;
+      transition: opacity 0.35s ease;  /* 待機⇄会話は頭の位置が一致しているので、表情だけがなめらかに変わる */
     }
     .talk-video.active {
       opacity: 1;
@@ -432,8 +432,8 @@
 
     const emotionIcons = {
       happy: "😊 ",
-      nod: "🤝 ",
-      curious: "🤔 ",
+      calm: "🙂 ",
+      sad: "😢 ",
       normal: "💬 "
     };
 
@@ -511,7 +511,7 @@
     setControlsDisabled(true);
     statusDot.className = "status-dot thinking";
     statusText.innerText = "アバター生成中...";
-    subtitle.innerText = "💡 新しい写真からループ動画とキャッシュを生成中（5〜10分ほどかかります）...";
+    subtitle.innerText = "💡 新しい写真からループ動画とキャッシュを生成中（感情ごとの表情も作るため20〜30分ほどかかります）...";
 
     try {
       const response = await fetch("/upload_avatar", {

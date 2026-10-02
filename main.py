@@ -70,6 +70,19 @@ TUNNEL_HEADERS = {"ngrok-skip-browser-warning": "true"}
 AIVIS_URL = "http://127.0.0.1:10101"
 SPEAKER_ID = 888753760
 
+# 感情ラベル → 声のスタイル（まお）。顔は Colab 側の同名の感情ループを使い、声と顔の感情を一致させる
+EMOTION_STYLE_IDS = {
+    "normal": 888753760,  # ノーマル
+    "happy": 888753762,   # あまあま
+    "calm": 888753763,    # おちつき
+    "sad": 888753765,     # せつなめ
+}
+EMOTION_ALIASES = {"nod": "calm", "curious": "normal"}  # 旧タグや想定外のタグの読み替え
+
+def normalize_emotion(emotion):
+    emotion = EMOTION_ALIASES.get(emotion, emotion)
+    return emotion if emotion in EMOTION_STYLE_IDS else "normal"
+
 # ====================================================
 # ファイルパス設定
 # ====================================================
@@ -91,14 +104,16 @@ SYSTEM_INSTRUCTION = """
    リアクションは内容に合わせて毎回変え、同じ言葉を続けて使わないでください。
    リアクションの例: えー、 / そっか、 / いいね、 / うーん、 / なるほど、 / わあ、 / えっ、 / うんうん、
 4. 文末は「〜だよ」「〜ですね」など、自然に会話を完結させてください。
-5. 返答の先頭に必ず感情タグ [happy], [nod], [curious], [normal] のいずれか1つを付与してください。
-   ・共感・相槌・肯定: [nod]
-   ・嬉しい話題・感謝・挨拶: [happy]
-   ・質問・疑問・聞き返し: [curious]
-   ・通常の返答: [normal]
+5. 返答の先頭に必ず感情タグ [normal], [happy], [calm], [sad] のいずれか1つを付与してください。
+   声と表情がこの感情になるので、返答の内容と合うものを選んでください。
+   ・嬉しい話題・楽しい話・感謝・挨拶: [happy]
+   ・共感・励まし・労い・穏やかな相槌: [calm]
+   ・悲しい話・残念な話・寂しさへの寄り添い: [sad]
+   ・質問への答えや説明など、それ以外: [normal]
    例: [happy] わあ、今日も会えて嬉しいよ！
-   例: [nod] そっか、それは大変だったね。
-   例: [curious] えっ、それってどういう意味なの？
+   例: [calm] そっか、今日は本当にお疲れさま。
+   例: [sad] そうなんだ、それはさみしかったね。
+   例: [normal] うーん、映画ならアニメがおすすめだよ。
 6. 絵文字、記号、マークダウン記号（*や#）、括弧による注釈は一切含めないでください。
 """
 
@@ -202,14 +217,14 @@ def get_gradio_client():
 # ====================================================
 # AivisSpeech 音声合成（起動直後でエンジン未準備なら最大30秒待つ）
 # ====================================================
-def synthesize_speech(text, wait_sec=30, pre_silence=None, post_silence=None):
+def synthesize_speech(text, wait_sec=30, pre_silence=None, post_silence=None, speaker=SPEAKER_ID):
     """pre_silence / post_silence: 音声前後の無音（秒）。区間分割時はつなぎ目の間を詰めるため短くする"""
     deadline = time.time() + wait_sec
     while True:
         try:
             query_res = requests.post(
                 f"{AIVIS_URL}/audio_query",
-                params={"text": text, "speaker": SPEAKER_ID},
+                params={"text": text, "speaker": speaker},
                 timeout=10
             )
             break
@@ -229,7 +244,7 @@ def synthesize_speech(text, wait_sec=30, pre_silence=None, post_silence=None):
 
     synth_res = requests.post(
         f"{AIVIS_URL}/synthesis",
-        params={"speaker": SPEAKER_ID},
+        params={"speaker": speaker},
         json=query_data,
         timeout=30
     )
@@ -284,7 +299,7 @@ def read_root():
 # ====================================================
 # Colab GPU による口パク動画生成（ダイレクトAPI優先、失敗時 Gradio Client）
 # ====================================================
-def generate_video(audio_path, out_path, start_frame=0):
+def generate_video(audio_path, out_path, start_frame=0, emotion="normal"):
     """start_frame: ループ動画の何コマ目から合成するか（ダイレクトAPIのみ対応）"""
     global gradio_client
     t0 = time.time()
@@ -296,7 +311,7 @@ def generate_video(audio_path, out_path, start_frame=0):
             res = requests.post(
                 f"{colab_url}/api/generate",
                 files={"audio": ("output.wav", f, "audio/wav")},
-                data={"start_frame": str(int(start_frame))},
+                data={"start_frame": str(int(start_frame)), "emotion": emotion},
                 headers=TUNNEL_HEADERS,
                 timeout=20
             )
@@ -342,7 +357,7 @@ def chat_and_generate_video(req: ChatRequest):
     try:
         response = chat_session.send_message(req.message)
         raw_reply = response.text.strip()
-        m = re.match(r"^\[(happy|nod|curious|normal)\]\s*(.*)", raw_reply)
+        m = re.match(r"^\[(happy|nod|curious|normal|calm|sad)\]\s*(.*)", raw_reply)
         if m:
             emotion = m.group(1)
             reply_text = m.group(2).strip()
@@ -401,7 +416,7 @@ def chat_and_generate_video(req: ChatRequest):
 # ====================================================
 FIRST_BOUNDARY = re.compile(r"[、。！？!?]")
 SENTENCE_BOUNDARY = re.compile(r"[。！？!?]")
-EMOTION_TAG = re.compile(r"^\s*\[(happy|nod|curious|normal)\]\s*")
+EMOTION_TAG = re.compile(r"^\s*\[(happy|nod|curious|normal|calm|sad)\]\s*")
 tts_executor = ThreadPoolExecutor(max_workers=1)
 video_executor = ThreadPoolExecutor(max_workers=1)
 
@@ -416,7 +431,7 @@ def iter_reply_segments(message):
             if emotion is None:
                 m = EMOTION_TAG.match(buf)
                 if m:
-                    emotion = m.group(1)
+                    emotion = normalize_emotion(m.group(1))
                     buf = buf[m.end():]
                 elif len(buf) < 12 and buf.lstrip().startswith("["):
                     continue  # タグの途中まで届いた状態
@@ -433,7 +448,7 @@ def iter_reply_segments(message):
     except Exception as e:
         print(f"⚠️ Gemini APIエラー検知: {e}")
         if first:
-            yield "nod", "ごめんね、ちょっと考えがまとまらなかったよ。"
+            yield "calm", "ごめんね、ちょっと考えがまとまらなかったよ。"
             return
     rest = EMOTION_TAG.sub("", buf).strip()
     if rest:
@@ -458,7 +473,7 @@ def wav_duration(wav_bytes):
     with wave.open(io.BytesIO(wav_bytes)) as w:
         return w.getnframes() / w.getframerate()
 
-def render_segment(index, wav_future, clock):
+def render_segment(index, wav_future, clock, emotion="normal"):
     """音声合成の完了を待ち、再生開始見込み時刻のコマから動画を生成して mp4 のバイト列を返す"""
     global render_sec_ema
     wav_bytes = wav_future.result()
@@ -473,7 +488,7 @@ def render_segment(index, wav_future, clock):
     clock["prev_end"] = play_at + wav_duration(wav_bytes)
     start_frame = round((clock["idle_time"] + (play_at - clock["t_send"])) * IDLE_FPS) % IDLE_TOTAL_FRAMES
 
-    generate_video(wav_path, mp4_path, start_frame)
+    generate_video(wav_path, mp4_path, start_frame, emotion)
     render_sec_ema = 0.7 * render_sec_ema + 0.3 * (time.time() - now)
     with open(mp4_path, "rb") as f:
         return f.read()
@@ -507,7 +522,7 @@ threading.Thread(target=poll_colab_tts, daemon=True).start()
 
 remote_executor = ThreadPoolExecutor(max_workers=4)  # 区間を並行して Colab に依頼する
 
-def render_segment_remote(index, text, clock):
+def render_segment_remote(index, text, clock, emotion="normal"):
     """Colab でテキスト→音声→口パク動画を一括生成（区間は並行依頼、コマ位置の連結は Colab 側が区間順に行う）。
     失敗時はローカル CPU 合成にフォールバック"""
     global remote_sec_ema
@@ -518,7 +533,7 @@ def render_segment_remote(index, text, clock):
     try:
         res = requests.post(
             f"{fetch_latest_colab_url()}/api/generate_from_text",
-            data={"text": text, "speaker": str(SPEAKER_ID), "speed": "1.22",
+            data={"text": text, "speaker": str(EMOTION_STYLE_IDS[emotion]), "emotion": emotion, "speed": "1.22",
                   "pre_silence": str(SEG_SILENCE), "post_silence": str(SEG_SILENCE),
                   "start_frame": str(start_frame), "turn_id": clock["turn_id"], "seg_index": str(index)},
             headers=TUNNEL_HEADERS,
@@ -532,8 +547,8 @@ def render_segment_remote(index, text, clock):
         return res.content
     except Exception as e:
         print(f"ℹ️ Colab GPU 合成に失敗、ローカル合成へ切り替え: {e}")
-        wav_future = tts_executor.submit(synthesize_speech, text, 30, SEG_SILENCE, SEG_SILENCE)
-        return render_segment(index, wav_future, clock)
+        wav_future = tts_executor.submit(synthesize_speech, text, 30, SEG_SILENCE, SEG_SILENCE, EMOTION_STYLE_IDS[emotion])
+        return render_segment(index, wav_future, clock, emotion)
 
 @app.post("/chat_stream")
 def chat_stream(req: ChatStreamRequest):
@@ -548,16 +563,19 @@ def chat_stream(req: ChatStreamRequest):
         clock = {"t_send": t_send, "idle_time": req.idle_time, "prev_end": 0.0,
                  "turn_id": secrets.token_hex(6)}
         jobs = []
+        reply_emotion = None  # 1回の返事は1つの感情で統一（声と顔が途中で変わると分かりにくい）
         try:
             for i, (emotion, seg) in enumerate(iter_reply_segments(req.message)):
+                reply_emotion = reply_emotion or normalize_emotion(emotion)
+                emotion = reply_emotion
                 print(f"🤖 [区間{i + 1} ({emotion})] ({time.time() - total_start:.2f}秒): {seg}")
                 if colab_tts_ready:
                     # 並行依頼は Colab 側が対応している場合のみ（古い Colab では出力ファイルが衝突するため直列）
                     executor = remote_executor if colab_turn_support else video_executor
-                    video_future = executor.submit(render_segment_remote, i, seg, clock)
+                    video_future = executor.submit(render_segment_remote, i, seg, clock, emotion)
                 else:
-                    wav_future = tts_executor.submit(synthesize_speech, seg, 30, SEG_SILENCE, SEG_SILENCE)
-                    video_future = video_executor.submit(render_segment, i, wav_future, clock)
+                    wav_future = tts_executor.submit(synthesize_speech, seg, 30, SEG_SILENCE, SEG_SILENCE, EMOTION_STYLE_IDS[emotion])
+                    video_future = video_executor.submit(render_segment, i, wav_future, clock, emotion)
                 jobs.append((emotion, seg, video_future))
 
             for i, (emotion, seg, video_future) in enumerate(jobs):
@@ -611,11 +629,11 @@ def api_sync_idle():
 # ====================================================
 # アバター自動生成・切り替えエンドポイント
 # ====================================================
-def run_setup_job_on_colab(colab_url, face_path, t0):
+def run_setup_job_on_colab(colab_url, face_path, t0, endpoint="/api/setup_avatar_start", max_sec=2700):
     """Colab に生成を開始させ、完了まで進み具合を確認する。
     戻り値: True=完了 / None=Colab が開始方式に未対応（古い Colab）。失敗時は例外"""
     with open(face_path, "rb") as f:
-        res = requests.post(f"{colab_url}/api/setup_avatar_start",
+        res = requests.post(f"{colab_url}{endpoint}",
                             files={"image": ("face.jpg", f, "image/jpeg")},
                             headers=TUNNEL_HEADERS, timeout=30)
     if res.status_code == 404:
@@ -623,19 +641,23 @@ def run_setup_job_on_colab(colab_url, face_path, t0):
     if res.status_code == 409:
         raise HTTPException(status_code=409, detail="Colab でアバター生成がすでに実行中です。終わるまでお待ちください。")
     res.raise_for_status()
-    while time.time() - t0 < 1500:  # 最大25分
+    last_detail = None
+    while time.time() - t0 < max_sec:  # 通常ループ＋感情ループ3種で T4 だと約25分
         time.sleep(5)
         try:
             st = requests.get(f"{colab_url}/api/setup_avatar_status", headers=TUNNEL_HEADERS, timeout=15).json()
         except Exception as e:
             print(f"ℹ️ 進捗確認に失敗（再試行します）: {e}")
             continue
+        if st.get("detail") != last_detail:
+            last_detail = st.get("detail")
+            print(f"⏳ Colab: {last_detail} ({st.get('elapsed')}秒経過)")
         if st.get("state") == "done":
             print(f"🎉 [アバター更新完了] ({st.get('elapsed')}秒)")
             return True
         if st.get("state") == "error":
             raise RuntimeError(st.get("detail"))
-    raise HTTPException(status_code=504, detail="アバター生成が25分以内に終わりませんでした。")
+    raise HTTPException(status_code=504, detail=f"アバター生成が{max_sec // 60}分以内に終わりませんでした。")
 
 # 長時間かかるので通常の def（async にすると完了までサーバー全体が他のリクエストに応答しなくなる）
 @app.post("/upload_avatar")
@@ -717,6 +739,23 @@ def upload_avatar(file: UploadFile = File(...)):
         raise HTTPException(status_code=500, detail=f"アバター生成エラー: {e}")
 
 
+@app.post("/api/setup_emotions")
+def setup_emotions():
+    """現在のアバター写真（face.jpg）から感情ループ（うれしい・穏やか・悲しい）だけを追加生成する"""
+    t0 = time.time()
+    face_path = os.path.join(BASE_DIR, "face.jpg")
+    print("\n🎭 感情ループの生成を Colab に依頼します（約15分）...")
+    try:
+        done = run_setup_job_on_colab(fetch_latest_colab_url(), face_path, t0, "/api/setup_emotions_start", 1800)
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"感情ループ生成エラー: {e}")
+    if done is None:
+        raise HTTPException(status_code=501, detail="Colab のコードが古いため感情ループを生成できません。Colab を再起動してください。")
+    return {"status": "success", "elapsed": round(time.time() - t0)}
+
+
 # ====================================================
 # Colab URL 取得・手動設定エンドポイント
 # ====================================================
@@ -746,4 +785,4 @@ def set_colab_url(req: SetUrlRequest):
     except Exception:
         pass
     return {"status": "success", "url": COLAB_GRADIO_URL}
-
+

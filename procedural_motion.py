@@ -43,11 +43,45 @@ def get_rotation_matrix_np(pitch_deg, yaw_deg, roll_deg):
     return np.ascontiguousarray(rot.T[np.newaxis, ...], dtype=np.float32)
 
 
+def expression_offsets(smile=0.0, eyebrow=0.0, mouth=0.0):
+    """表情パラメータ → LivePortrait の表情キーポイント差分 exp (1, 21, 3)
+    係数は ComfyUI-AdvancedLivePortrait の表情エディタ（calc_fe）に準拠。
+      smile:   -0.3〜1.3 程度（正で口角が上がる、負で下がる）
+      eyebrow: -10〜15 程度（正で眉が上がる、負で眉を寄せる）
+      mouth:   0〜 （口の開き）
+    """
+    e = np.zeros((1, 21, 3), dtype=np.float32)
+    e[0, 20, 1] += smile * -0.01
+    e[0, 14, 1] += smile * -0.02
+    e[0, 17, 1] += smile * 0.0065
+    e[0, 17, 2] += smile * 0.003
+    e[0, 13, 1] += smile * -0.00275
+    e[0, 16, 1] += smile * -0.00275
+    e[0, 3, 1] += smile * -0.0035
+    e[0, 7, 1] += smile * -0.0035
+
+    e[0, 19, 1] += mouth * 0.001
+    e[0, 19, 2] += mouth * 0.0001
+    e[0, 17, 1] += mouth * -0.0001
+
+    if eyebrow > 0:
+        e[0, 1, 1] += eyebrow * 0.001
+        e[0, 2, 1] += eyebrow * -0.001
+    else:
+        e[0, 1, 0] += eyebrow * -0.001
+        e[0, 2, 0] += eyebrow * 0.001
+        e[0, 1, 1] += eyebrow * 0.0003
+        e[0, 2, 1] += eyebrow * -0.0003
+    return e
+
+
 def generate_procedural_motion(
     motion_type="idle",
     duration_sec=8.0,
     fps=25,
-    emotion=None
+    emotion=None,
+    expression=None,
+    eye_open=1.0
 ):
     """
     数式によって自律的なモーションテンプレート辞書を生成
@@ -56,7 +90,9 @@ def generate_procedural_motion(
         motion_type: "idle", "nod", "happy", "curious"
         duration_sec: アニメーションの秒数（idle は 8 の倍数を推奨: 呼吸4秒・ゆらぎ8秒の整数周期で完全シームレスループ）
         fps: フレームレート (25)
-        emotion: オプションの感情名 ("happy", "nod", "curious", "normal")
+        emotion: オプションの感情名 ("happy", "nod", "curious", "normal")。頭の動きも変わる
+        expression: 表情だけを変える dict（expression_offsets の引数）。頭の動きは idle と同一のまま
+        eye_open: 目の開き具合の倍率（1.0 で通常。笑顔で細める等）
     Returns:
         driving_template_dct (dict): LivePortrait が直接読み込めるテンプレート形式
     """
@@ -110,7 +146,7 @@ def generate_procedural_motion(
 
     # 3. 自律まばたきカーブ (Eye close ratio)
     # 開眼時: 0.38, 閉眼時: 0.03
-    eye_ratio = np.full(n_frames, 0.38, dtype=np.float32)
+    eye_ratio = np.full(n_frames, 0.38 * eye_open, dtype=np.float32)
 
     # まばたきは 2.5〜5.5秒の不規則な間隔で配置（人は毎分15〜20回程度、等間隔だと機械的に見える）
     # 形: 2コマで閉じ → 1コマ閉眼 → 3コマで開く（約240ms。閉じる方が開くより速い）
@@ -121,8 +157,10 @@ def generate_procedural_motion(
         b_idx = int(b_time * fps)
         if b_idx + len(blink_shape) >= n_frames:  # ループの継ぎ目をまたがない
             break
-        eye_ratio[b_idx:b_idx + len(blink_shape)] = blink_shape
+        eye_ratio[b_idx:b_idx + len(blink_shape)] = np.minimum(blink_shape, 0.38 * eye_open)
         b_time += rng.uniform(2.5, 5.5)
+
+    expr_vec = expression_offsets(**expression) if expression else None
 
     # 4. モーションフレーム辞書リストの構築
     motion_list = []
@@ -140,6 +178,8 @@ def generate_procedural_motion(
             # LivePortrait expression dim 19/20 are lip corners
             exp_vec[0, 19, 1] -= 0.015
             exp_vec[0, 20, 1] -= 0.015
+        if expr_vec is not None:
+            exp_vec = exp_vec + expr_vec
 
         item_dct = {
             'scale': scale_vec,
@@ -172,7 +212,9 @@ def save_procedural_motion_template(
     duration_sec=8.0,
     fps=25,
     emotion=None,
-    wrap_pad_frames=0
+    wrap_pad_frames=0,
+    expression=None,
+    eye_open=1.0
 ):
     """
     指定パスに LivePortrait 互換 .pkl モーションテンプレートを出力保存
@@ -184,7 +226,9 @@ def save_procedural_motion_template(
         motion_type=motion_type,
         duration_sec=duration_sec,
         fps=fps,
-        emotion=emotion
+        emotion=emotion,
+        expression=expression,
+        eye_open=eye_open
     )
     p = wrap_pad_frames
     if p > 0:
@@ -192,6 +236,13 @@ def save_procedural_motion_template(
             lst = template_dct[key]
             template_dct[key] = lst[-p:] + lst + lst[:p]
         template_dct["n_frames"] += 2 * p
+
+    if expression and p > 0:
+        # 相対モーションでは各コマの表情が「先頭コマとの差」で適用されるため、全コマ同じ表情だと打ち消される。
+        # 先頭コマ（切り落とす余白）だけ無表情にして基準にし、以降のコマに表情差分が乗るようにする
+        first = dict(template_dct["motion"][0])
+        first["exp"] = first["exp"] - expression_offsets(**expression)
+        template_dct["motion"][0] = first
     os.makedirs(os.path.dirname(os.path.abspath(output_pkl_path)), exist_ok=True)
     with open(output_pkl_path, "wb") as f:
         pickle.dump(template_dct, f, protocol=pickle.HIGHEST_PROTOCOL)

@@ -226,24 +226,175 @@ def reload_avatar_cache(loop_video_path="/content/base_avatar_loop.mp4", cache_f
     cap.release()
     cached_frames = frames
 
+    gpu_face_tensor = precompute_face_tensor(cached_frames, cached_coords)
+    emotion_cache.clear()  # 別アバターの感情ループが残らないように（必要なら load_emotion_caches で読み直す）
+    print(f"✅ アバターキャッシュ展開完了 ({len(cached_frames)} フレーム, FPS: {cached_fps})")
+    return True
+
+def precompute_face_tensor(frames, coords):
+    """Wav2Lip 入力用の顔切り抜き（下半分マスク＋参照）を全フレーム分 GPU に展開"""
     precomputed_imgs = []
-    for f, (y1, y2, x1, x2) in zip(cached_frames, cached_coords):
+    for f, (y1, y2, x1, x2) in zip(frames, coords):
         face_crop = cv2.resize(f[y1:y2, x1:x2], (img_size, img_size))
         face_crop_masked = face_crop.copy()
         face_crop_masked[img_size // 2 :] = 0
         combined = np.concatenate((face_crop_masked, face_crop), axis=2) / 255.0
         precomputed_imgs.append(combined.transpose(2, 0, 1))
+    return torch.FloatTensor(np.array(precomputed_imgs)).to(device)
 
-    gpu_face_tensor = torch.FloatTensor(np.array(precomputed_imgs)).to(device)
-    print(f"✅ アバターキャッシュ展開完了 ({len(cached_frames)} フレーム, FPS: {cached_fps})")
-    return True
+# ------------------------------------------------------------------------------
+# 感情ループ: 頭の動き・まばたきは通常ループと完全に同じで、表情だけが違うループ
+#   → コマ番号をそのまま共有でき、感情が切り替わっても頭の位置は飛ばず表情だけが変わる。
+#   顔座標は通常ループのものを流用（頭の位置が同じため）。
+# ------------------------------------------------------------------------------
+import json
+EMOTION_NAMES = ("happy", "calm", "sad")
+DEFAULT_EMOTION_PRESETS = {
+    "happy": {"expression": {"smile": 0.9, "eyebrow": 3.0}, "eye_open": 0.85},
+    "calm": {"expression": {"smile": 0.35}, "eye_open": 0.92},
+    "sad": {"expression": {"smile": -0.3, "eyebrow": -6.0}, "eye_open": 0.8},
+}
+EMOTION_PRESETS_FILE = f"{DRIVE_DIR}/emotion_presets.json"
+emotion_presets = dict(DEFAULT_EMOTION_PRESETS)
+try:
+    if os.path.exists(EMOTION_PRESETS_FILE):
+        emotion_presets.update(json.load(open(EMOTION_PRESETS_FILE, encoding="utf-8")))
+except Exception as e:
+    print(f"⚠️ 感情プリセットの読み込みをスキップ: {e}")
+emotion_cache = {}  # emotion -> {"frames": [...], "gpu": tensor}
+
+def emotion_loop_path(emo):
+    return f"/content/base_avatar_loop_{emo}.mp4"
+
+def read_video_frames(path):
+    cap = cv2.VideoCapture(path)
+    frames = []
+    while True:
+        ret, frame = cap.read()
+        if not ret:
+            break
+        frames.append(frame)
+    cap.release()
+    return frames
+
+def load_emotion_caches():
+    """保存済みの感情ループ（/content か Drive）を読み込む。通常ループとコマ数が違うもの（古いアバター用）は無視"""
+    for emo in EMOTION_NAMES:
+        path = emotion_loop_path(emo)
+        drive_path = f"{DRIVE_DIR}/base_avatar_loop_{emo}.mp4"
+        if not os.path.exists(path) and os.path.exists(drive_path):
+            shutil.copy(drive_path, path)
+        if not os.path.exists(path):
+            continue
+        frames = read_video_frames(path)
+        if len(frames) != len(cached_frames) or len(cached_frames) == 0:
+            print(f"ℹ️ 感情ループ [{emo}] は現在のアバターと一致しないため使いません")
+            continue
+        emotion_cache[emo] = {"frames": frames, "gpu": precompute_face_tensor(frames, cached_coords)}
+    if emotion_cache:
+        print(f"✅ 感情ループ展開完了: {', '.join(sorted(emotion_cache))}")
+
+def build_emotion_loops(face_img_path, emotions=EMOTION_NAMES, progress=None):
+    """現在のアバター写真から感情ループを生成（1つあたり LivePortrait 数分）"""
+    for n, emo in enumerate(emotions, 1):
+        if progress:
+            progress(f"感情ループ生成中 {n}/{len(emotions)} ({emo})")
+        preset = emotion_presets[emo]
+        frames, fps = render_idle_loop_frames(face_img_path, expression=preset.get("expression"),
+                                              eye_open=preset.get("eye_open", 1.0), tag=emo)
+        if len(frames) != len(cached_frames):
+            raise RuntimeError(f"感情ループ [{emo}] のコマ数 {len(frames)} が通常ループ {len(cached_frames)} と一致しません")
+        h, w = frames[0].shape[:2]
+        out = cv2.VideoWriter(emotion_loop_path(emo), cv2.VideoWriter_fourcc(*'mp4v'), fps, (w, h))
+        for f in frames:
+            out.write(f)
+        out.release()
+        try:
+            shutil.copy(emotion_loop_path(emo), f"{DRIVE_DIR}/base_avatar_loop_{emo}.mp4")
+        except Exception:
+            pass
+        gpu = precompute_face_tensor(frames, cached_coords)
+        with gpu_lock:
+            emotion_cache[emo] = {"frames": frames, "gpu": gpu}
+        print(f"✅ 感情ループ [{emo}] 準備完了", flush=True)
 
 # 既存キャッシュがあれば展開
 reload_avatar_cache()
+load_emotion_caches()
 
 # ==============================================================================
 # 4. アバター自動生成・切り替え関数 (setup_avatar)
 # ==============================================================================
+IDLE_LOOP_SEC = 8.0 if device == 'cpu' else 32.0  # 8 の倍数秒: 全周期が揃い、順再生で継ぎ目のないループになる
+IDLE_LOOP_PAD = 25  # 前後1秒の余白（LivePortrait の平滑化の端の影響を切り落とす）
+
+def render_idle_loop_frames(face_img_path, expression=None, eye_open=1.0, tag="idle", duration=None):
+    """待機モーション（＋任意の表情）を LivePortrait で動画化し、余白を除いたループのフレーム列と fps を返す。
+    expression 以外（頭の動き・まばたき）は常に同じなので、表情違いのループ同士はコマ単位で頭の位置が一致する"""
+    try:
+        from procedural_motion import save_procedural_motion_template
+    except ImportError:
+        sys.path.append("/content/memorial-api")
+        from procedural_motion import save_procedural_motion_template
+
+    duration = duration or IDLE_LOOP_SEC
+    pkl = f"/content/procedural_{tag}.pkl"
+    save_procedural_motion_template(pkl, motion_type="idle", duration_sec=duration, fps=25,
+                                    wrap_pad_frames=IDLE_LOOP_PAD, expression=expression, eye_open=eye_open)
+
+    lp_output_dir = os.path.join(LIVEPORTRAIT_DIR, "animations")
+    os.makedirs(lp_output_dir, exist_ok=True)
+    lp_cmd = [
+        sys.executable, "inference.py",
+        "-s", face_img_path,
+        "-d", pkl,
+        "--flag_relative_motion",
+        "--flag_do_crop",
+        "--driving_option", "expression-friendly",
+        "--flag_eye_retargeting"
+    ]
+    if device == 'cpu':
+        lp_cmd.append("--flag_force_cpu")
+        print("⚠️ CPUモードのため LivePortrait に --flag_force_cpu を適用します", flush=True)
+
+    t0 = time.time()
+    proc = subprocess.Popen(lp_cmd, cwd=LIVEPORTRAIT_DIR, stdout=subprocess.PIPE,
+                            stderr=subprocess.STDOUT, text=True, bufsize=1)
+    output_lines = [line for line in proc.stdout]
+    proc.wait()
+    if proc.returncode != 0:
+        full_err = "".join(output_lines[-20:])
+        print(f"❌ LivePortrait 実行エラー:\n{full_err}")
+        raise RuntimeError(f"LivePortraitエラー: {full_err}")
+
+    # 出力名は「<元画像名>--<テンプレート名>.mp4」（並べて表示する *_concat.mp4 は除外）
+    stem = os.path.splitext(os.path.basename(face_img_path))[0]
+    out_mp4 = os.path.join(lp_output_dir, f"{stem}--procedural_{tag}.mp4")
+    if not os.path.exists(out_mp4):
+        cands = [os.path.join(lp_output_dir, f) for f in os.listdir(lp_output_dir)
+                 if f.endswith(".mp4") and "concat" not in f]
+        if not cands:
+            raise RuntimeError("LivePortrait の動画生成結果 (.mp4) が見つかりませんでした。")
+        out_mp4 = max(cands, key=os.path.getmtime)
+
+    cap = cv2.VideoCapture(out_mp4)
+    fps = cap.get(cv2.CAP_PROP_FPS) or 25.0
+    frames = []
+    while True:
+        ret, frame = cap.read()
+        if not ret:
+            break
+        frames.append(frame)
+    cap.release()
+    if not frames:
+        raise RuntimeError("LivePortrait動画の読み込みに失敗しました。")
+
+    expected = int(duration * 25)
+    if len(frames) >= expected + 2 * IDLE_LOOP_PAD:
+        frames = frames[IDLE_LOOP_PAD:IDLE_LOOP_PAD + expected]
+    print(f"✅ LivePortrait 生成完了 [{tag}] ({len(frames)} フレーム, {time.time() - t0:.0f}秒)", flush=True)
+    return frames, fps
+
 def setup_avatar(face_img_path):
     """
     静止画1枚から LivePortrait で待機ループ動画と顔座標キャッシュを全自動生成し、
@@ -256,95 +407,11 @@ def setup_avatar(face_img_path):
         if not os.path.exists(face_img_path):
             raise FileNotFoundError(f"入力顔画像が見つかりません: {face_img_path}")
 
-        # 1. 外部動画不要！数式アルゴリズムから自律モーションテンプレート(.pkl)を生成
-        procedural_pkl = "/content/procedural_idle.pkl"
+        # 1. 外部動画不要！数式アルゴリズムから自律モーションテンプレートを作り LivePortrait で動画化
         print("🧠 [1/4] 数式アルゴリズムから自律待機モーション（呼吸・ゆらぎ・まばたき）を生成中...", flush=True)
-        try:
-            from procedural_motion import save_procedural_motion_template
-        except ImportError:
-            sys.path.append("/content/memorial-api")
-            from procedural_motion import save_procedural_motion_template
-
-        # 8 の倍数秒にすると全周期が揃い、そのまま繰り返すだけで継ぎ目のないループになる
-        duration = 8.0 if device == 'cpu' else 32.0
-        loop_pad = 25  # 前後1秒の余白（LivePortrait の平滑化の端の影響を切り落とす）
-        save_procedural_motion_template(
-            procedural_pkl,
-            motion_type="idle",
-            duration_sec=duration,
-            fps=25,
-            wrap_pad_frames=loop_pad
-        )
-
-        lp_output_dir = os.path.join(LIVEPORTRAIT_DIR, "animations")
-        os.makedirs(lp_output_dir, exist_ok=True)
-
-        lp_cmd = [
-            sys.executable, "inference.py",
-            "-s", face_img_path,
-            "-d", procedural_pkl,
-            "--flag_relative_motion",
-            "--flag_do_crop",
-            "--driving_option", "expression-friendly",
-            "--flag_eye_retargeting"
-        ]
-
-        if device == 'cpu':
-            lp_cmd.append("--flag_force_cpu")
-            print("⚠️ CPUモードのため LivePortrait に --flag_force_cpu を適用します", flush=True)
-
-        # リアルタイムに進捗ログを出力
-        proc = subprocess.Popen(
-            lp_cmd,
-            cwd=LIVEPORTRAIT_DIR,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.STDOUT,
-            text=True,
-            bufsize=1
-        )
-        output_lines = []
-        for line in proc.stdout:
-            print(line, end="", flush=True)
-            output_lines.append(line)
-        proc.wait()
-
-        if proc.returncode != 0:
-            full_err = "".join(output_lines[-20:])
-            print("❌ LivePortrait 実行エラー:")
-            print(full_err)
-            raise RuntimeError(f"LivePortraitエラー: {full_err}")
-
-        generated_videos = [
-            os.path.join(lp_output_dir, f) for f in os.listdir(lp_output_dir) if f.endswith(".mp4")
-        ]
-        if not generated_videos:
-            raise RuntimeError("LivePortrait の動画生成結果 (.mp4) が見つかりませんでした。")
-
-        latest_lp = max(generated_videos, key=os.path.getmtime)
-        print(f"✅ LivePortrait 生成完了: {latest_lp}", flush=True)
-
-
-        # 2. ループ動画の作成（モーションが周期的なので往復させず順再生で継ぎ目なくつながる）
+        raw_frames, fps = render_idle_loop_frames(face_img_path)
         BASE_LOOP_VIDEO = "/content/base_avatar_loop.mp4"
-        cap = cv2.VideoCapture(latest_lp)
-        fps = cap.get(cv2.CAP_PROP_FPS) or 25.0
-        width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
-        height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
-
-        raw_frames = []
-        while True:
-            ret, frame = cap.read()
-            if not ret:
-                break
-            raw_frames.append(frame)
-        cap.release()
-
-        if not raw_frames:
-            raise RuntimeError("LivePortrait動画の読み込みに失敗しました。")
-
-        expected = int(duration * 25)
-        if len(raw_frames) >= expected + 2 * loop_pad:
-            raw_frames = raw_frames[loop_pad:loop_pad + expected]
+        height, width = raw_frames[0].shape[:2]
         total_frames = len(raw_frames)
         print(f"🚀 [2/4] {total_frames / fps:.0f}秒のループ動画を作成中 ({total_frames}フレーム)...", flush=True)
 
@@ -396,13 +463,21 @@ def setup_avatar(face_img_path):
         # 5. ブラウザ待機用の avatar_idle.mp4 を口パク動画と同じ画質で生成（切り替え時の見た目を一致させる）
         avatar_idle_path = make_idle_video("/content/avatar_idle.mp4")
 
+        # 前のアバターの感情ループは新しい顔と合わないので片付ける（Drive 側は *_prev へ退避）
+        for emo in EMOTION_NAMES:
+            if os.path.exists(emotion_loop_path(emo)):
+                os.remove(emotion_loop_path(emo))
+
         # Google Drive にもバックアップ保存（前のアバターは *_prev として1世代残す）
         try:
-            for name in ("base_avatar_loop.mp4", "base_avatar_cache.npz", "avatar_idle.mp4"):
+            emo_names = [f"base_avatar_loop_{emo}.mp4" for emo in EMOTION_NAMES]
+            for name in ["base_avatar_loop.mp4", "base_avatar_cache.npz", "avatar_idle.mp4"] + emo_names:
                 src = f"{DRIVE_DIR}/{name}"
                 if os.path.exists(src):
                     base, ext = os.path.splitext(src)
                     shutil.copy(src, f"{base}_prev{ext}")
+                    if name in emo_names:
+                        os.remove(src)
             shutil.copy(BASE_LOOP_VIDEO, f"{DRIVE_DIR}/base_avatar_loop.mp4")
             shutil.copy(CACHE_FILE, f"{DRIVE_DIR}/base_avatar_cache.npz")
             shutil.copy(avatar_idle_path, f"{DRIVE_DIR}/avatar_idle.mp4")
@@ -496,12 +571,16 @@ def count_video_frames(audio_path):
         i += 1
     return i + 1
 
-def fast_process_pipeline(face_img_path, audio_path, start_frame=0, out_path="/content/final_synced_output.mp4"):
-    """start_frame: ループ動画の何コマ目から合成を始めるか（区間をまたいで頭の動きを連続させる）"""
+def fast_process_pipeline(face_img_path, audio_path, start_frame=0, out_path="/content/final_synced_output.mp4", emotion=None):
+    """start_frame: ループ動画の何コマ目から合成を始めるか（区間をまたいで頭の動きを連続させる）
+    emotion: 感情ループ（happy / calm / sad）を土台にする。未生成なら通常ループ"""
     t_start = time.time()
 
     if gpu_face_tensor is None or len(cached_frames) == 0:
         raise RuntimeError("アバターがセットアップされていません。まずアバター画像をセットアップしてください。")
+    emo = emotion_cache.get(emotion) if emotion else None
+    src_frames = emo["frames"] if emo else cached_frames
+    src_tensor = emo["gpu"] if emo else gpu_face_tensor
 
     wav = audio.load_wav(audio_path, 16000)
     mel = audio.melspectrogram(wav)
@@ -522,7 +601,7 @@ def fast_process_pipeline(face_img_path, audio_path, start_frame=0, out_path="/c
     num_frames = len(mel_chunks)
     total_cached = len(cached_frames)
     start_frame = int(start_frame) % total_cached
-    full_frames = [cached_frames[(start_frame + idx) % total_cached].copy() for idx in range(num_frames)]
+    full_frames = [src_frames[(start_frame + idx) % total_cached].copy() for idx in range(num_frames)]
     coords = [cached_coords[(start_frame + idx) % total_cached] for idx in range(num_frames)]
 
     t_gpu = time.time()
@@ -532,7 +611,7 @@ def fast_process_pipeline(face_img_path, audio_path, start_frame=0, out_path="/c
         cur_batch_len = len(batch_mels)
 
         indices = [(start_frame + i + k) % total_cached for k in range(cur_batch_len)]
-        img_tensor = gpu_face_tensor[indices]
+        img_tensor = src_tensor[indices]
         mel_tensor = torch.FloatTensor(np.array(batch_mels)).unsqueeze(1).to(device)
 
         with torch.no_grad():
@@ -720,7 +799,8 @@ def api_idle_video():
 
 @api_app.get("/api/tts_status")
 def api_tts_status():
-    return {**aivis_state, "turn_support": True}  # turn_support: 区間の並行依頼に対応
+    # turn_support: 区間の並行依頼に対応 / emotions: 生成済みの感情ループ
+    return {**aivis_state, "turn_support": True, "emotions": sorted(emotion_cache)}
 
 # 1回の返答（turn）の区間は並行してリクエストされる。音声合成だけは区間順に行い、
 # 各区間の開始コマ = 前の区間の終了コマ として頭の動きを連続させる。口パク合成は GPU を1本ずつ使う。
@@ -745,6 +825,7 @@ def api_generate_from_text(
     post_silence: float = Form(0.05),
     start_frame: int = Form(0),
     turn_id: str = Form(""),
+    emotion: str = Form(""),
     seg_index: int = Form(0),
 ):
     """テキスト → GPU音声合成 → 口パク動画 を Colab 内で一括実行（音声のアップロード往復も不要）
@@ -782,7 +863,7 @@ def api_generate_from_text(
     out_mp4 = temp_wav.replace(".wav", ".mp4")
     try:
         with gpu_lock:
-            mp4_path = fast_process_pipeline(None, temp_wav, my_start, out_mp4)
+            mp4_path = fast_process_pipeline(None, temp_wav, my_start, out_mp4, emotion or None)
         print(f"⚡ [テキスト→動画 完了] 合成 {tts_sec:.2f}秒 | 合計 {time.time() - t0:.2f}秒: {text}", flush=True)
         from starlette.background import BackgroundTask
         return FileResponse(
@@ -800,7 +881,7 @@ def api_generate_from_text(
 # 重い処理の窓口は async にしない（async 内で重い処理を直接実行すると、終わるまで
 # サーバー全体が他のリクエストに応答しなくなる。通常の def なら別スレッドで実行される）
 @api_app.post("/api/generate")
-def api_generate(audio: UploadFile = File(...), start_frame: int = Form(0)):
+def api_generate(audio: UploadFile = File(...), start_frame: int = Form(0), emotion: str = Form("")):
     t0 = time.time()
     temp_wav = f"/content/req_{int(time.time() * 1000)}.wav"
     with open(temp_wav, "wb") as f:
@@ -808,7 +889,7 @@ def api_generate(audio: UploadFile = File(...), start_frame: int = Form(0)):
     try:
         out_mp4 = temp_wav.replace(".wav", ".mp4")
         with gpu_lock:
-            mp4_path = fast_process_pipeline(None, temp_wav, start_frame, out_mp4)
+            mp4_path = fast_process_pipeline(None, temp_wav, start_frame, out_mp4, emotion or None)
         print(f"⚡ [ダイレクトAPI動画生成完了] ({time.time() - t0:.2f}秒)", flush=True)
         from starlette.background import BackgroundTask
         return FileResponse(mp4_path, media_type="video/mp4", filename="final_output.mp4",
@@ -841,10 +922,17 @@ def api_setup_avatar(image: UploadFile = File(...)):
 # 開始だけ受け付けて裏で実行し、進み具合は /api/setup_avatar_status で確認してもらう方式。
 setup_job = {"state": "idle", "detail": "", "started": None, "elapsed": None}
 
-def run_setup_job(temp_img):
+def run_setup_job(temp_img, kind="full"):
+    """kind: full = 通常ループ＋感情ループ / emotions = 感情ループだけ（現在のアバターに追加）"""
+    def progress(msg):
+        setup_job["detail"] = msg
+        print(f"🎭 {msg}", flush=True)
     try:
-        setup_avatar(temp_img)
-        setup_job.update(state="done", detail="アバター生成完了")
+        if kind == "full":
+            progress("通常ループ生成中")
+            setup_avatar(temp_img)
+        build_emotion_loops(temp_img, progress=progress)
+        setup_job.update(state="done", detail="アバター生成完了" if kind == "full" else "感情ループ生成完了")
     except Exception as e:
         setup_job.update(state="error", detail=f"{type(e).__name__}: {e}")
     finally:
@@ -855,8 +943,7 @@ def run_setup_job(temp_img):
             except Exception:
                 pass
 
-@api_app.post("/api/setup_avatar_start")
-def api_setup_avatar_start(image: UploadFile = File(...)):
+def start_setup_job(image, kind):
     if setup_job["state"] == "running":
         from fastapi import HTTPException
         raise HTTPException(status_code=409, detail="アバター生成がすでに実行中です")
@@ -864,8 +951,63 @@ def api_setup_avatar_start(image: UploadFile = File(...)):
     with open(temp_img, "wb") as f:
         f.write(image.file.read())
     setup_job.update(state="running", detail="生成中", started=time.time(), elapsed=None)
-    threading.Thread(target=run_setup_job, args=(temp_img,), daemon=True).start()
-    return {"state": "running"}
+    threading.Thread(target=run_setup_job, args=(temp_img, kind), daemon=True).start()
+    return {"state": "running", "kind": kind}
+
+@api_app.post("/api/setup_avatar_start")
+def api_setup_avatar_start(image: UploadFile = File(...)):
+    return start_setup_job(image, "full")
+
+@api_app.post("/api/setup_emotions_start")
+def api_setup_emotions_start(image: UploadFile = File(...)):
+    """現在のアバター（同じ写真）に感情ループだけを追加生成。通常ループは作り直さない"""
+    if len(cached_frames) == 0:
+        from fastapi import HTTPException
+        raise HTTPException(status_code=400, detail="先に通常のアバターを生成してください")
+    return start_setup_job(image, "emotions")
+
+@api_app.get("/api/emotion_presets")
+def api_get_emotion_presets():
+    return emotion_presets
+
+@api_app.post("/api/emotion_presets")
+def api_set_emotion_presets(presets: dict):
+    """表情プリセットを更新（Colab 再起動なしで調整するため）。Drive にも保存し次回起動時に読み込む"""
+    for emo, val in presets.items():
+        if emo in EMOTION_NAMES:
+            emotion_presets[emo] = val
+    try:
+        os.makedirs(DRIVE_DIR, exist_ok=True)
+        json.dump(emotion_presets, open(EMOTION_PRESETS_FILE, "w", encoding="utf-8"), ensure_ascii=False, indent=1)
+    except Exception as e:
+        print(f"⚠️ 感情プリセットの保存に失敗: {e}")
+    return emotion_presets
+
+preview_lock = threading.Lock()
+
+@api_app.post("/api/expression_preview")
+def api_expression_preview(image: UploadFile = File(...), preset: str = Form("{}")):
+    """表情の試し撮り: 2秒の短いループを生成し、通常ループの顔と並べた PNG を返す（約30秒）"""
+    p = json.loads(preset)
+    temp_img = f"/content/preview_{int(time.time() * 1000)}.jpg"
+    with open(temp_img, "wb") as f:
+        f.write(image.file.read())
+    try:
+        with preview_lock:
+            frames, _ = render_idle_loop_frames(temp_img, expression=p.get("expression"),
+                                                eye_open=p.get("eye_open", 1.0), tag="preview", duration=2.0)
+        shot = frames[10]
+        ref = cached_frames[10] if len(cached_frames) > 10 else shot
+        if ref.shape != shot.shape:
+            ref = cv2.resize(ref, (shot.shape[1], shot.shape[0]))
+        out_png = temp_img.replace(".jpg", ".png")
+        cv2.imwrite(out_png, np.hstack([ref, shot]))
+        from starlette.background import BackgroundTask
+        return FileResponse(out_png, media_type="image/png",
+                            background=BackgroundTask(lambda: os.path.exists(out_png) and os.remove(out_png)))
+    finally:
+        if os.path.exists(temp_img):
+            os.remove(temp_img)
 
 @api_app.get("/api/setup_avatar_status")
 def api_setup_avatar_status():
