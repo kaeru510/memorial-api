@@ -41,3 +41,7 @@ colab_start.ipynb
 
 # Colab URL のローカルキャッシュ（ngrok 固定URL運用では未使用）
 colab_url.txt
+
+# 声の学習用の録音（個人の声なので公開しない）
+voice_data/recordings/
+voice_data/work/
