@@ -487,6 +487,29 @@ def fast_process_pipeline(face_img_path, audio_path):
     return final_mp4
 
 # ==============================================================================
+# 5.5. ウォームアップ（初回リクエストだけ librosa/CUDA の初期化で十数秒かかるのを起動時に済ませる）
+# ==============================================================================
+def warmup_pipeline():
+    import wave
+    warm_wav = "/content/warmup.wav"
+    sr = 16000
+    noise = (np.random.randn(int(sr * 1.5)) * 300).astype(np.int16)
+    with wave.open(warm_wav, "wb") as w:
+        w.setnchannels(1)
+        w.setsampwidth(2)
+        w.setframerate(sr)
+        w.writeframes(noise.tobytes())
+    t0 = time.time()
+    fast_process_pipeline(None, warm_wav)
+    print(f"🔥 ウォームアップ完了 ({time.time() - t0:.2f}秒) - 初回の会話から高速に応答します", flush=True)
+
+if gpu_face_tensor is not None:
+    try:
+        warmup_pipeline()
+    except Exception as e:
+        print(f"⚠️ ウォームアップスキップ: {e}")
+
+# ==============================================================================
 # 6. Gradio サーバー起動
 # ==============================================================================
 print("🚀 [4/4] Gradio サーバー起動中...")
@@ -519,10 +542,14 @@ with gr.Blocks() as demo:
 # ==============================================================================
 # 6.5. ダイレクト超高速 API (FastAPI 直結ルート) の登録
 # ==============================================================================
-from fastapi import UploadFile, File
+from fastapi import FastAPI, UploadFile, File
 from fastapi.responses import FileResponse
 
-@demo.app.post("/api/generate")
+# demo.app に登録したルートは demo.launch() 時に作り直される App に引き継がれず 404 になる。
+# 独自の FastAPI にルートを登録し、Gradio をその上にマウントして起動する（ngrok モード時）
+api_app = FastAPI()
+
+@api_app.post("/api/generate")
 async def api_generate(audio: UploadFile = File(...)):
     t0 = time.time()
     temp_wav = f"/content/req_{int(time.time() * 1000)}.wav"
@@ -540,7 +567,7 @@ async def api_generate(audio: UploadFile = File(...)):
             except Exception:
                 pass
 
-@demo.app.post("/api/setup_avatar")
+@api_app.post("/api/setup_avatar")
 async def api_setup_avatar(image: UploadFile = File(...)):
     t0 = time.time()
     temp_img = f"/content/face_{int(time.time() * 1000)}.jpg"
@@ -669,8 +696,14 @@ def sync_url_worker():
         else:
             time.sleep(1)
 
-threading.Thread(target=sync_url_worker, daemon=True).start()
-
-demo.launch(share=True, debug=True, show_error=True, allowed_paths=["/content"])
+if NGROK_AUTHTOKEN and NGROK_DOMAIN:
+    # 固定URL運用: ダイレクトAPI(/api/*) と Gradio(/) を同じポート 7860 で提供（gradio.live 共有リンクは不要）
+    import uvicorn
+    app = gr.mount_gradio_app(api_app, demo, path="/", allowed_paths=["/content"], show_error=True)
+    uvicorn.run(app, host="127.0.0.1", port=7860, log_level="warning")
+else:
+    # 従来運用: gradio.live 共有リンク + クラウド同期（この場合ダイレクトAPIは使えず Gradio 経由になる）
+    threading.Thread(target=sync_url_worker, daemon=True).start()
+    demo.launch(share=True, debug=True, show_error=True, allowed_paths=["/content"])
 
 

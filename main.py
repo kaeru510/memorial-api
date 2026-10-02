@@ -7,6 +7,7 @@ import traceback
 import shutil
 import secrets
 import urllib.parse
+import threading
 
 # Windows の cp932 環境での絵文字出力エラー対策
 if sys.platform == "win32":
@@ -192,6 +193,49 @@ def get_gradio_client():
     return gradio_client
 
 # ====================================================
+# AivisSpeech 音声合成（起動直後でエンジン未準備なら最大30秒待つ）
+# ====================================================
+def synthesize_speech(text, wait_sec=30):
+    deadline = time.time() + wait_sec
+    while True:
+        try:
+            query_res = requests.post(
+                f"{AIVIS_URL}/audio_query",
+                params={"text": text, "speaker": SPEAKER_ID},
+                timeout=10
+            )
+            break
+        except requests.exceptions.ConnectionError:
+            if time.time() > deadline:
+                raise
+            time.sleep(1)
+    query_res.raise_for_status()
+    query_data = query_res.json()
+
+    # ★ 話速を 1.22倍 に設定（自然な早口で動画総フレーム数を大幅削減）
+    query_data["speedScale"] = 1.22
+
+    synth_res = requests.post(
+        f"{AIVIS_URL}/synthesis",
+        params={"speaker": SPEAKER_ID},
+        json=query_data,
+        timeout=30
+    )
+    synth_res.raise_for_status()
+    return synth_res.content
+
+def warmup_aivis():
+    """初回合成だけ遅い（約3.6秒→2回目以降1.5秒）ので、起動時に裏で1回合成しておく"""
+    try:
+        t0 = time.time()
+        synthesize_speech("こんにちは。", wait_sec=90)
+        print(f"🔥 音声合成ウォームアップ完了 ({time.time() - t0:.2f}秒)")
+    except Exception as e:
+        print(f"⚠️ 音声合成ウォームアップスキップ: {e}")
+
+threading.Thread(target=warmup_aivis, daemon=True).start()
+
+# ====================================================
 # FastAPI アプリ初期化
 # ====================================================
 security = HTTPBasic()
@@ -257,27 +301,9 @@ def chat_and_generate_video(req: ChatRequest):
 # 2. AivisSpeech で音声合成（話速1.15倍でテンポUP & フレーム数削減）
     t0 = time.time()
     try:
-        query_res = requests.post(
-            f"{AIVIS_URL}/audio_query",
-            params={"text": reply_text, "speaker": SPEAKER_ID},
-            timeout=10
-        )
-        query_res.raise_for_status()
-        query_data = query_res.json()
-        
-        # ★ 話速を 1.22倍 に設定（自然な早口で動画総フレーム数を大幅削減）
-        query_data["speedScale"] = 1.22
-
-        synth_res = requests.post(
-            f"{AIVIS_URL}/synthesis",
-            params={"speaker": SPEAKER_ID},
-            json=query_data,
-            timeout=30
-        )
-        synth_res.raise_for_status()
-
+        wav_bytes = synthesize_speech(reply_text)
         with open(OUTPUT_AUDIO_PATH, "wb") as f:
-            f.write(synth_res.content)
+            f.write(wav_bytes)
         print(f"🎉 [2. 音声合成] ({time.time() - t0:.2f}秒)")
     except Exception as e:
         traceback.print_exc()
