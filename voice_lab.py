@@ -82,7 +82,7 @@ def setup_sbv2():
         _run(["uv", "venv", "-q", "-p", "3.11", SBV2_VENV])
     _run(["uv", "pip", "install", "-q", "--python", SBV2_PY, "-r", f"{SBV2_DIR}/requirements-colab.txt", "aivmlib",
           "setuptools<81", "tensorboard", "GPUtil", "psutil",
-          "torch==2.8.*", "torchaudio==2.8.*", "torchvision==0.23.*"])
+          "torch==2.8.*", "torchaudio==2.8.*", "torchvision==0.23.*", "huggingface_hub<1.0", "transformers<5"])
     _log("事前学習モデルと BERT をダウンロード中...")
     _run([SBV2_PY, "initialize.py", "--skip_default_models"], cwd=SBV2_DIR)
     import yaml
@@ -145,6 +145,11 @@ def train(model, epochs=100, batch=4, save_every=500, install_fn=None):
     # requirements-colab.txt は torch の版を固定していないので、使える 2.8 系にそろえる（torchvision も対応版に）
     if subprocess.run([SBV2_PY, "-c", "import torchaudio; torchaudio.AudioMetaData"], capture_output=True).returncode != 0:
         missing += ["torch==2.8.*", "torchaudio==2.8.*", "torchvision==0.23.*"]
+    # pyannote.audio 3.x は hf_hub_download(use_auth_token=...) を使うが、huggingface_hub 1.0 で削除された。
+    # transformers 5 は huggingface_hub 1.x を要求するので、両方を 1.0 未満 / 5 未満にそろえる
+    if subprocess.run([SBV2_PY, "-c", "import huggingface_hub as h; assert int(h.__version__.split('.')[0]) < 1"],
+                      capture_output=True).returncode != 0:
+        missing += ["huggingface_hub<1.0", "transformers<5"]
     if missing:
         _log(f"不足・不適合の部品を入れ直し中（{', '.join(missing)}）...")
         os.environ["PATH"] = "/root/.local/bin:/root/.cargo/bin:" + os.environ["PATH"]
