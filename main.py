@@ -611,15 +611,42 @@ def api_sync_idle():
 # ====================================================
 # アバター自動生成・切り替えエンドポイント
 # ====================================================
+def run_setup_job_on_colab(colab_url, face_path, t0):
+    """Colab に生成を開始させ、完了まで進み具合を確認する。
+    戻り値: True=完了 / None=Colab が開始方式に未対応（古い Colab）。失敗時は例外"""
+    with open(face_path, "rb") as f:
+        res = requests.post(f"{colab_url}/api/setup_avatar_start",
+                            files={"image": ("face.jpg", f, "image/jpeg")},
+                            headers=TUNNEL_HEADERS, timeout=30)
+    if res.status_code == 404:
+        return None
+    if res.status_code == 409:
+        raise HTTPException(status_code=409, detail="Colab でアバター生成がすでに実行中です。終わるまでお待ちください。")
+    res.raise_for_status()
+    while time.time() - t0 < 1500:  # 最大25分
+        time.sleep(5)
+        try:
+            st = requests.get(f"{colab_url}/api/setup_avatar_status", headers=TUNNEL_HEADERS, timeout=15).json()
+        except Exception as e:
+            print(f"ℹ️ 進捗確認に失敗（再試行します）: {e}")
+            continue
+        if st.get("state") == "done":
+            print(f"🎉 [アバター更新完了] ({st.get('elapsed')}秒)")
+            return True
+        if st.get("state") == "error":
+            raise RuntimeError(st.get("detail"))
+    raise HTTPException(status_code=504, detail="アバター生成が25分以内に終わりませんでした。")
+
+# 長時間かかるので通常の def（async にすると完了までサーバー全体が他のリクエストに応答しなくなる）
 @app.post("/upload_avatar")
-async def upload_avatar(file: UploadFile = File(...)):
+def upload_avatar(file: UploadFile = File(...)):
     print("\n" + "=" * 50)
     print(f"📷 新しいアバター画像を受信: {file.filename}")
     print("=" * 50)
 
     # 1. ローカルの face.jpg を上書き保存
     temp_face_path = os.path.join(BASE_DIR, "face.jpg")
-    content = await file.read()
+    content = file.file.read()
     with open(temp_face_path, "wb") as f:
         f.write(content)
     print(f"✅ ローカルに保存しました: {temp_face_path}")
@@ -632,26 +659,32 @@ async def upload_avatar(file: UploadFile = File(...)):
         setup_success = False
         dest_idle_path = os.path.join(STATIC_DIR, "avatar_idle.mp4")
 
-        # 【超高速優先ルート】ダイレクトAPI (/api/setup_avatar) へ画像を一撃POST
-        direct_url = f"{colab_url}/api/setup_avatar"
+        # 【推奨ルート】開始だけ依頼して進み具合を確認（約10分の処理でも接続切れの影響を受けない）
         try:
-            with open(temp_face_path, "rb") as f:
-                res = requests.post(
-                    direct_url,
-                    files={"image": ("face.jpg", f, "image/jpeg")},
-                    headers=TUNNEL_HEADERS,
-                    timeout=900  # 32秒ループの LivePortrait 生成＋顔検出で T4 だと約8分かかる
-                )
-            if res.ok and len(res.content) > 1000:
-                with open(dest_idle_path, "wb") as out_f:
-                    out_f.write(res.content)
-                setup_success = True
-                print(f"🎉 [アバター更新完了 (ダイレクト)] ({time.time() - t0:.2f}秒): {dest_idle_path}")
-        except requests.exceptions.ReadTimeout:
-            # Colab 側では生成が続いている。フォールバックすると同じ生成を二重に始めてしまうため中断
-            raise HTTPException(status_code=504, detail="アバター生成が時間内に終わりませんでした。Colab 側で処理が続いている可能性があるので、数分後にページを再読み込みしてください。")
-        except Exception as dir_err:
-            print(f"ℹ️ ダイレクトアバター更新待機/フォールバック: {dir_err}")
+            setup_success = bool(run_setup_job_on_colab(colab_url, temp_face_path, t0))
+        except requests.exceptions.ConnectionError as e:
+            print(f"ℹ️ 開始方式の依頼に失敗: {e}")
+
+        # 【旧ルート】ダイレクトAPI (/api/setup_avatar) へ画像を一撃POST（古い Colab 用）
+        if not setup_success:
+            try:
+                with open(temp_face_path, "rb") as f:
+                    res = requests.post(
+                        f"{colab_url}/api/setup_avatar",
+                        files={"image": ("face.jpg", f, "image/jpeg")},
+                        headers=TUNNEL_HEADERS,
+                        timeout=900  # 32秒ループの LivePortrait 生成＋顔検出で T4 だと約10分かかる
+                    )
+                if res.ok and len(res.content) > 1000:
+                    with open(dest_idle_path, "wb") as out_f:
+                        out_f.write(res.content)
+                    setup_success = True
+                    print(f"🎉 [アバター更新完了 (ダイレクト)] ({time.time() - t0:.2f}秒): {dest_idle_path}")
+            except requests.exceptions.ReadTimeout:
+                # Colab 側では生成が続いている。フォールバックすると同じ生成を二重に始めてしまうため中断
+                raise HTTPException(status_code=504, detail="アバター生成が時間内に終わりませんでした。Colab 側で処理が続いている可能性があるので、数分後にページを再読み込みしてください。")
+            except Exception as dir_err:
+                print(f"ℹ️ ダイレクトアバター更新待機/フォールバック: {dir_err}")
 
         # 【フォールバック】従来の Gradio Client 経由
         if not setup_success:

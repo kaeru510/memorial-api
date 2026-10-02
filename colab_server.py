@@ -837,6 +837,43 @@ def api_setup_avatar(image: UploadFile = File(...)):
             except Exception:
                 pass
 
+# アバター生成は約10分かかり、1回の HTTP リクエストで待つとトンネル経由で接続が切れることがある。
+# 開始だけ受け付けて裏で実行し、進み具合は /api/setup_avatar_status で確認してもらう方式。
+setup_job = {"state": "idle", "detail": "", "started": None, "elapsed": None}
+
+def run_setup_job(temp_img):
+    try:
+        setup_avatar(temp_img)
+        setup_job.update(state="done", detail="アバター生成完了")
+    except Exception as e:
+        setup_job.update(state="error", detail=f"{type(e).__name__}: {e}")
+    finally:
+        setup_job["elapsed"] = round(time.time() - setup_job["started"], 1)
+        if os.path.exists(temp_img):
+            try:
+                os.remove(temp_img)
+            except Exception:
+                pass
+
+@api_app.post("/api/setup_avatar_start")
+def api_setup_avatar_start(image: UploadFile = File(...)):
+    if setup_job["state"] == "running":
+        from fastapi import HTTPException
+        raise HTTPException(status_code=409, detail="アバター生成がすでに実行中です")
+    temp_img = f"/content/face_{int(time.time() * 1000)}.jpg"
+    with open(temp_img, "wb") as f:
+        f.write(image.file.read())
+    setup_job.update(state="running", detail="生成中", started=time.time(), elapsed=None)
+    threading.Thread(target=run_setup_job, args=(temp_img,), daemon=True).start()
+    return {"state": "running"}
+
+@api_app.get("/api/setup_avatar_status")
+def api_setup_avatar_status():
+    st = dict(setup_job)
+    if st["state"] == "running":
+        st["elapsed"] = round(time.time() - st["started"], 1)
+    return st
+
 # ==============================================================================
 # 7. 高速トンネル (Cloudflare) ＆ URL自動クラウド同期
 # ==============================================================================
