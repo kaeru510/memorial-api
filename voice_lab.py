@@ -18,6 +18,7 @@ import os
 import re
 import shutil
 import subprocess
+import sys
 import threading
 import time
 import zipfile
@@ -31,12 +32,22 @@ ASSETS_ROOT = f"{VOICE_ROOT}/model_assets"
 AIVMX_DIR = f"{VOICE_ROOT}/aivmx"
 VOICES_JSON = f"{VOICE_ROOT}/voices.json"   # {model_name: {"uuid":..., "styles": {スタイル名: ID}}}
 LOG_PATH = "/content/voice_train.log"
+STATUS_PATH = "/content/voice_status.json"
+REPO_DIR = "/content/memorial-api"
 
 job = {"state": "idle", "detail": "", "model": None, "started": None, "elapsed": None, "step": None, "total_steps": None}
 
 
+def _save_status():
+    try:
+        json.dump(job, open(STATUS_PATH, "w", encoding="utf-8"), ensure_ascii=False)
+    except Exception:
+        pass
+
+
 def _log(msg):
     job["detail"] = msg
+    _save_status()
     print(f"🎙️ [声の学習] {msg}", flush=True)
 
 
@@ -81,8 +92,24 @@ def setup_sbv2():
 
 
 PREPROCESS_RUNNER = r'''
-import os, sys
+import os, sys, socket, subprocess, time
 os.chdir("{sbv2}"); sys.path.insert(0, "{sbv2}")
+# 読み解析（pyopenjtalk）の補助サーバーを先に起動して待つ。SBV2 は起動を10秒しか待たず、
+# 初回は辞書の読み込み等でそれ以上かかることがあるため。出力はログに残す
+port = 7861
+log = open("/content/pyopenjtalk_worker.log", "w")
+proc = subprocess.Popen([sys.executable, "-m", "style_bert_vits2.nlp.japanese.pyopenjtalk_worker", "--port", str(port)],
+                        stdout=log, stderr=subprocess.STDOUT, start_new_session=True)
+for _ in range(240):
+    try:
+        socket.create_connection((socket.gethostname(), port), timeout=1).close()
+        break
+    except OSError:
+        if proc.poll() is not None:
+            raise RuntimeError("読み解析サーバーが終了しました: " + open("/content/pyopenjtalk_worker.log").read()[-1500:])
+        time.sleep(0.5)
+else:
+    raise RuntimeError("読み解析サーバーが120秒以内に起動しませんでした: " + open("/content/pyopenjtalk_worker.log").read()[-1500:])
 from gradio_tabs.train import preprocess_all
 from style_bert_vits2.nlp.japanese import pyopenjtalk_worker
 pyopenjtalk_worker.initialize_worker()
@@ -158,35 +185,53 @@ def load_voices():
         return {}
 
 
+def install_aivmx(aivis_url, model, aivmx_path):
+    """AIVMX を AivisSpeech Engine に登録し、スタイル名 → スタイルID を voices.json に記録"""
+    import requests
+    before = set(requests.get(f"{aivis_url}/aivm_models", timeout=30).json().keys())
+    with open(aivmx_path, "rb") as f:
+        r = requests.post(f"{aivis_url}/aivm_models/install", files={"file": (os.path.basename(aivmx_path), f)}, timeout=300)
+    r.raise_for_status()
+    models = requests.get(f"{aivis_url}/aivm_models", timeout=30).json()
+    new = [u for u in models if u not in before] or [u for u, v in models.items()
+                                                    if v.get("manifest", {}).get("name") == model]
+    if not new:
+        prev = load_voices().get(model, {}).get("uuid")  # 同じ UUID で再登録された場合
+        new = [prev] if prev in models else []
+    if not new:
+        raise RuntimeError("登録したモデルが見つかりません")
+    uuid = new[0]
+    speaker_uuids = [sp["uuid"] for sp in models[uuid]["manifest"]["speakers"]]
+    styles = {}
+    for sp in requests.get(f"{aivis_url}/speakers", timeout=30).json():
+        if sp.get("speaker_uuid") in speaker_uuids:
+            styles.update({st["name"]: st["id"] for st in sp["styles"]})
+    voices = load_voices()
+    voices[model] = {"uuid": uuid, "styles": styles, "aivmx": aivmx_path}
+    os.makedirs(VOICE_ROOT, exist_ok=True)
+    json.dump(voices, open(VOICES_JSON, "w", encoding="utf-8"), ensure_ascii=False, indent=1)
+    print(f"🎙️ 学習済みの声 [{model}] を登録: {styles}", flush=True)
+
+
+def run_job(model, epochs, aivis_url):
+    """学習プロセスの本体（python voice_lab.py train ... で別プロセスとして実行される）"""
+    job.update(state="running", model=model, started=time.time(), elapsed=None, step=None, total_steps=None)
+    _save_status()
+    try:
+        train(model, epochs=epochs, install_fn=lambda m, p: install_aivmx(aivis_url, m, p))
+        job["state"] = "done"
+    except Exception as e:
+        job.update(state="error", detail=f"{type(e).__name__}: {e}")
+        print(f"❌ [声の学習] {e}", flush=True)
+    job["elapsed"] = round(time.time() - job["started"])
+    _save_status()
+
+
 def register(api_app, aivis_url, is_aivis_ready):
     """colab_server の FastAPI に声の学習用 API を追加。aivis_url はColab内の AivisSpeech Engine"""
     import requests
     from fastapi import File, Form, HTTPException, UploadFile
     from fastapi.responses import FileResponse
-
-    def install_aivmx(model, aivmx_path):
-        before = set(requests.get(f"{aivis_url}/aivm_models", timeout=30).json().keys())
-        with open(aivmx_path, "rb") as f:
-            r = requests.post(f"{aivis_url}/aivm_models/install", files={"file": (os.path.basename(aivmx_path), f)}, timeout=300)
-        r.raise_for_status()
-        models = requests.get(f"{aivis_url}/aivm_models", timeout=30).json()
-        new = [u for u in models if u not in before] or [u for u, v in models.items()
-                                                        if v.get("manifest", {}).get("name") == model]
-        if not new:
-            # 同じ UUID で再登録された場合など: 前回の記録を使う
-            prev = load_voices().get(model, {}).get("uuid")
-            new = [prev] if prev in models else []
-        if not new:
-            raise RuntimeError("登録したモデルが見つかりません")
-        uuid = new[0]
-        styles = {}
-        for sp in requests.get(f"{aivis_url}/speakers", timeout=30).json():
-            if sp.get("speaker_uuid") in [s["uuid"] for s in models[uuid]["manifest"]["speakers"]]:
-                styles.update({st["name"]: st["id"] for st in sp["styles"]})
-        voices = load_voices()
-        voices[model] = {"uuid": uuid, "styles": styles, "aivmx": aivmx_path}
-        json.dump(voices, open(VOICES_JSON, "w", encoding="utf-8"), ensure_ascii=False, indent=1)
-        print(f"🎙️ 学習済みの声 [{model}] を登録: {styles}", flush=True)
 
     def reinstall_saved_voices():
         """Colab 起動時: Drive に保存済みの学習済み声を音声エンジンに入れ直す（エンジンのモデル置き場は毎回消えるため）"""
@@ -199,7 +244,7 @@ def register(api_app, aivis_url, is_aivis_ready):
         for model, info in load_voices().items():
             if os.path.exists(info.get("aivmx", "")):
                 try:
-                    install_aivmx(model, info["aivmx"])
+                    install_aivmx(aivis_url, model, info["aivmx"])
                 except Exception as e:
                     print(f"⚠️ 学習済みの声 [{model}] の再登録に失敗: {e}", flush=True)
 
@@ -222,26 +267,36 @@ def register(api_app, aivis_url, is_aivis_ready):
         n = len(glob.glob(f"{data_dir}/raw/**/*.wav", recursive=True))
         return {"model_name": model_name, "wav_files": n}
 
+    proc_holder = {"proc": None}
+
+    def read_status():
+        try:
+            return json.load(open(STATUS_PATH, encoding="utf-8"))
+        except Exception:
+            return dict(job)
+
     @api_app.post("/api/voice/train_start")
     def api_voice_train_start(model_name: str = Form(...), epochs: int = Form(100)):
-        if job["state"] == "running":
+        p = proc_holder["proc"]
+        if p is not None and p.poll() is None:
             raise HTTPException(status_code=409, detail="学習はすでに実行中です")
-        job.update(state="running", model=model_name, started=time.time(), elapsed=None, step=None, total_steps=None)
-
-        def run():
-            try:
-                train(model_name, epochs=epochs, install_fn=install_aivmx)
-                job["state"] = "done"
-            except Exception as e:
-                job.update(state="error", detail=f"{type(e).__name__}: {e}")
-                print(f"❌ [声の学習] {e}", flush=True)
-        threading.Thread(target=run, daemon=True).start()
+        # 学習処理は毎回 GitHub の最新コードで別プロセスとして動かす（不具合修正に Colab の再起動が要らない）
+        subprocess.run(["git", "-C", REPO_DIR, "pull", "-q"], check=False)
+        json.dump({**job, "state": "running", "detail": "開始中", "model": model_name, "started": time.time()},
+                  open(STATUS_PATH, "w", encoding="utf-8"), ensure_ascii=False)
+        out = open("/content/voice_job_stdout.log", "a")
+        proc_holder["proc"] = subprocess.Popen(
+            [sys.executable, f"{REPO_DIR}/voice_lab.py", "train", model_name, str(epochs), aivis_url],
+            stdout=out, stderr=subprocess.STDOUT, cwd=REPO_DIR)
         return {"state": "running"}
 
     @api_app.get("/api/voice/status")
     def api_voice_status():
-        st = dict(job)
-        if st["state"] == "running" and st["started"]:
+        st = read_status()
+        p = proc_holder["proc"]
+        if st.get("state") == "running" and p is not None and p.poll() is not None:
+            st["state"], st["detail"] = "error", f"学習プロセスが異常終了しました (code {p.returncode})"
+        if st.get("state") == "running" and st.get("started"):
             st["elapsed"] = round(time.time() - st["started"])
         try:
             st["log_tail"] = open(LOG_PATH, encoding="utf-8", errors="ignore").read()[-1500:]
@@ -259,3 +314,9 @@ def register(api_app, aivis_url, is_aivis_ready):
         if not info or not os.path.exists(info.get("aivmx", "")):
             raise HTTPException(status_code=404, detail="学習済みの声が見つかりません")
         return FileResponse(info["aivmx"], media_type="application/octet-stream", filename=f"{model_name}.aivmx")
+
+
+if __name__ == "__main__":
+    # python voice_lab.py train <model> <epochs> <aivis_url>
+    if len(sys.argv) >= 5 and sys.argv[1] == "train":
+        run_job(sys.argv[2], int(sys.argv[3]), sys.argv[4])
