@@ -231,6 +231,8 @@ def install_aivmx(aivis_url, model, aivmx_path):
 
 def run_job(model, epochs, aivis_url):
     """学習プロセスの本体（python voice_lab.py train ... で別プロセスとして実行される）"""
+    # ノートブックが設定する MPLBACKEND（matplotlib_inline）は専用環境では無効な値で、pyannote の import が失敗する
+    os.environ["MPLBACKEND"] = "Agg"
     job.update(state="running", model=model, started=time.time(), elapsed=None, step=None, total_steps=None)
     _save_status()
     try:
