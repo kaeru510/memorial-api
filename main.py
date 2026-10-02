@@ -8,6 +8,11 @@ import shutil
 import secrets
 import urllib.parse
 import threading
+import json
+import base64
+import io
+import wave
+from concurrent.futures import ThreadPoolExecutor
 
 # Windows の cp932 環境での絵文字出力エラー対策
 if sys.platform == "win32":
@@ -17,7 +22,7 @@ if sys.platform == "win32":
     except Exception:
         pass
 from fastapi import FastAPI, HTTPException, Depends, status, UploadFile, File
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.security import HTTPBasic, HTTPBasicCredentials
 from pydantic import BaseModel
@@ -81,17 +86,20 @@ SYSTEM_INSTRUCTION = """
 あなたは親しみやすい対話AIアシスタントです。
 以下のルールを必ず守って返答してください：
 1. 友達のように明るく親しみやすい口調で話してください。
-2. 会話のテンポを最優先するため、必ず1文のみ（15文字〜35文字程度）で短く簡潔に答えてください。
-3. 文末は「〜だよ」「〜ですね」など、自然に会話を完結させてください。
-4. 返答の先頭に必ず感情タグ [happy], [nod], [curious], [normal] のいずれか1つを付与してください。
+2. 会話のテンポを最優先するため、返答全体は20文字〜45文字程度に短くまとめてください。
+3. 返答は必ず、相手の発言に合った短いリアクション（2〜6文字程度）と読点で始め、そのあとに本文を1文続けてください。
+   リアクションは内容に合わせて毎回変え、同じ言葉を続けて使わないでください。
+   リアクションの例: えー、 / そっか、 / いいね、 / うーん、 / なるほど、 / わあ、 / えっ、 / うんうん、
+4. 文末は「〜だよ」「〜ですね」など、自然に会話を完結させてください。
+5. 返答の先頭に必ず感情タグ [happy], [nod], [curious], [normal] のいずれか1つを付与してください。
    ・共感・相槌・肯定: [nod]
    ・嬉しい話題・感謝・挨拶: [happy]
    ・質問・疑問・聞き返し: [curious]
    ・通常の返答: [normal]
-   例: [happy] 今日も会えて嬉しいよ！
-   例: [nod] それは素晴らしいですね！
-   例: [curious] それってどういう意味なの？
-5. 絵文字、記号、マークダウン記号（*や#）、括弧による注釈は一切含めないでください。
+   例: [happy] わあ、今日も会えて嬉しいよ！
+   例: [nod] そっか、それは大変だったね。
+   例: [curious] えっ、それってどういう意味なの？
+6. 絵文字、記号、マークダウン記号（*や#）、括弧による注釈は一切含めないでください。
 """
 
 gemini_client = genai.Client(api_key=GEMINI_API_KEY)
@@ -195,7 +203,8 @@ def get_gradio_client():
 # ====================================================
 # AivisSpeech 音声合成（起動直後でエンジン未準備なら最大30秒待つ）
 # ====================================================
-def synthesize_speech(text, wait_sec=30):
+def synthesize_speech(text, wait_sec=30, pre_silence=None, post_silence=None):
+    """pre_silence / post_silence: 音声前後の無音（秒）。区間分割時はつなぎ目の間を詰めるため短くする"""
     deadline = time.time() + wait_sec
     while True:
         try:
@@ -214,6 +223,10 @@ def synthesize_speech(text, wait_sec=30):
 
     # ★ 話速を 1.22倍 に設定（自然な早口で動画総フレーム数を大幅削減）
     query_data["speedScale"] = 1.22
+    if pre_silence is not None:
+        query_data["prePhonemeLength"] = pre_silence
+    if post_silence is not None:
+        query_data["postPhonemeLength"] = post_silence
 
     synth_res = requests.post(
         f"{AIVIS_URL}/synthesis",
@@ -270,6 +283,51 @@ def read_root():
     return {"message": "index.html が見つかりません。"}
 
 # ====================================================
+# Colab GPU による口パク動画生成（ダイレクトAPI優先、失敗時 Gradio Client）
+# ====================================================
+def generate_video(audio_path, out_path, start_frame=0):
+    """start_frame: ループ動画の何コマ目から合成するか（ダイレクトAPIのみ対応）"""
+    global gradio_client
+    t0 = time.time()
+    colab_url = fetch_latest_colab_url()
+
+    # 【超高速優先ルート】ダイレクトAPI (/api/generate) へ音声のみ一撃POST
+    try:
+        with open(audio_path, "rb") as f:
+            res = requests.post(
+                f"{colab_url}/api/generate",
+                files={"audio": ("output.wav", f, "audio/wav")},
+                data={"start_frame": str(int(start_frame))},
+                headers=TUNNEL_HEADERS,
+                timeout=20
+            )
+        if res.ok and len(res.content) > 1000:
+            with open(out_path, "wb") as out_f:
+                out_f.write(res.content)
+            print(f"🎬 [3. 高速ダイレクト動画合成+転送] ({time.time() - t0:.2f}秒)")
+            return
+        print(f"ℹ️ ダイレクトAPI応答異常 (HTTP {res.status_code})、フォールバックします")
+    except Exception as dir_err:
+        print(f"ℹ️ ダイレクトAPI待機/フォールバック: {dir_err}")
+
+    # 【フォールバック】従来の Gradio Client 経由
+    print("🔄 Gradio Client へフォールバックして動画生成中...")
+    try:
+        client = get_gradio_client()
+        result_video_path = client.predict(
+            face_img_path=handle_file(FACE_IMG_PATH),
+            audio_path=handle_file(audio_path),
+            api_name="/process_pipeline"
+        )
+    except HTTPException:
+        raise
+    except Exception:
+        gradio_client = None
+        raise
+    shutil.copy(result_video_path, out_path)
+    print(f"🎬 [3. Gradioフォールバック動画合成] ({time.time() - t0:.2f}秒)")
+
+# ====================================================
 # 対話＆動画生成エンドポイント
 # ====================================================
 @app.post("/chat")
@@ -310,48 +368,13 @@ def chat_and_generate_video(req: ChatRequest):
         raise HTTPException(status_code=500, detail=f"音声合成エラー: {e}")
 
     # 3. Colab GPU による動画生成
-    t0 = time.time()
     try:
         print("🚀 Colab で口パク動画を合成中...")
-        colab_url = fetch_latest_colab_url()
-        video_success = False
-
-        # 【超高速優先ルート】ダイレクトAPI (/api/generate) へ音声のみ一撃POST
-        direct_url = f"{colab_url}/api/generate"
-        try:
-            with open(OUTPUT_AUDIO_PATH, "rb") as f:
-                res = requests.post(
-                    direct_url,
-                    files={"audio": ("output.wav", f, "audio/wav")},
-                    headers=TUNNEL_HEADERS,
-                    timeout=20
-                )
-            if res.ok and len(res.content) > 1000:
-                with open(FINAL_VIDEO_PATH, "wb") as out_f:
-                    out_f.write(res.content)
-                video_success = True
-                print(f"🎬 [3. 高速ダイレクト動画合成+転送] ({time.time() - t0:.2f}秒)")
-        except Exception as dir_err:
-            print(f"ℹ️ ダイレクトAPI待機/フォールバック: {dir_err}")
-
-        # 【フォールバック】従来の Gradio Client 経由
-        if not video_success:
-            print("🔄 Gradio Client へフォールバックして動画生成中...")
-            client = get_gradio_client()
-            result_video_path = client.predict(
-                face_img_path=handle_file(FACE_IMG_PATH),
-                audio_path=handle_file(OUTPUT_AUDIO_PATH),
-                api_name="/process_pipeline"
-            )
-            shutil.copy(result_video_path, FINAL_VIDEO_PATH)
-            print(f"🎬 [3. Gradioフォールバック動画合成] ({time.time() - t0:.2f}秒)")
-
+        generate_video(OUTPUT_AUDIO_PATH, FINAL_VIDEO_PATH)
     except HTTPException:
         raise
     except Exception as e:
         traceback.print_exc()
-        global gradio_client
-        gradio_client = None
         raise HTTPException(status_code=500, detail=f"動画生成エラー: {e}")
 
     print("-" * 50)
@@ -370,6 +393,157 @@ def chat_and_generate_video(req: ChatRequest):
         }
     )
 
+
+# ====================================================
+# ストリーミング対話エンドポイント（流れ作業で話し始めを早める）
+#   Gemini の返答をストリームで受け、区切り（最初のリアクションは「、」、以降は文末）ごとに
+#   音声合成 → 動画生成をパイプライン実行し、できた区間から NDJSON で順に返す。
+#   音声合成と動画生成は別スレッドなので、区間1の動画生成中に区間2の音声合成が進む。
+# ====================================================
+FIRST_BOUNDARY = re.compile(r"[、。！？!?]")
+SENTENCE_BOUNDARY = re.compile(r"[。！？!?]")
+EMOTION_TAG = re.compile(r"^\s*\[(happy|nod|curious|normal)\]\s*")
+tts_executor = ThreadPoolExecutor(max_workers=1)
+video_executor = ThreadPoolExecutor(max_workers=1)
+
+def iter_reply_segments(message):
+    """Gemini のストリームから (emotion, 区間テキスト) を区切りが確定した順に yield"""
+    buf = ""
+    emotion = None
+    first = True
+    try:
+        for chunk in chat_session.send_message_stream(message):
+            buf += chunk.text or ""
+            if emotion is None:
+                m = EMOTION_TAG.match(buf)
+                if m:
+                    emotion = m.group(1)
+                    buf = buf[m.end():]
+                elif len(buf) < 12 and buf.lstrip().startswith("["):
+                    continue  # タグの途中まで届いた状態
+                else:
+                    emotion = "normal"
+            while True:
+                m = (FIRST_BOUNDARY if first else SENTENCE_BOUNDARY).search(buf)
+                if not m:
+                    break
+                seg, buf = buf[:m.end()].strip(), buf[m.end():]
+                if seg:
+                    yield emotion, seg
+                    first = False
+    except Exception as e:
+        print(f"⚠️ Gemini APIエラー検知: {e}")
+        if first:
+            yield "nod", "ごめんね、ちょっと考えがまとまらなかったよ。"
+            return
+    rest = EMOTION_TAG.sub("", buf).strip()
+    if rest:
+        yield emotion or "normal", rest
+
+# ----------------------------------------------------
+# 待機動画と口パク動画の「共通の時計」
+#   ブラウザの待機動画は会話中も裏で再生し続けるので、その再生位置を時計とみなす。
+#   各区間は「再生が始まる見込みの時刻」に待機動画が表示しているはずのコマから合成すれば、
+#   待機⇄会話の切り替えや区間のつなぎ目で頭の位置が飛ばない。
+# ----------------------------------------------------
+IDLE_TOTAL_FRAMES = 750   # Colab のループ動画のコマ数（/api/sync_idle で更新）
+IDLE_FPS = 25.0
+render_sec_ema = 1.4      # 動画生成+転送の所要秒数の移動平均（再生開始時刻の見積もりに使う）
+SEG_SILENCE = 0.05        # 区間の前後につける無音（秒）。標準は約0.1〜0.17秒
+
+class ChatStreamRequest(BaseModel):
+    message: str
+    idle_time: float = 0.0  # 送信時点の待機動画の再生位置（秒）
+
+def wav_duration(wav_bytes):
+    with wave.open(io.BytesIO(wav_bytes)) as w:
+        return w.getnframes() / w.getframerate()
+
+def render_segment(index, wav_future, clock):
+    """音声合成の完了を待ち、再生開始見込み時刻のコマから動画を生成して mp4 のバイト列を返す"""
+    global render_sec_ema
+    wav_bytes = wav_future.result()
+    wav_path = os.path.join(BASE_DIR, f"seg_{index}.wav")
+    mp4_path = os.path.join(BASE_DIR, f"seg_{index}.mp4")
+    with open(wav_path, "wb") as f:
+        f.write(wav_bytes)
+
+    # 再生開始見込み = max(動画が届く見込み, 前の区間が終わる時刻)
+    now = time.time()
+    play_at = max(now + render_sec_ema, clock["prev_end"])
+    clock["prev_end"] = play_at + wav_duration(wav_bytes)
+    start_frame = round((clock["idle_time"] + (play_at - clock["t_send"])) * IDLE_FPS) % IDLE_TOTAL_FRAMES
+
+    generate_video(wav_path, mp4_path, start_frame)
+    render_sec_ema = 0.7 * render_sec_ema + 0.3 * (time.time() - now)
+    with open(mp4_path, "rb") as f:
+        return f.read()
+
+@app.post("/chat_stream")
+def chat_stream(req: ChatStreamRequest):
+    t_send = time.time()
+
+    def event_stream():
+        total_start = time.time()
+        print("\n" + "=" * 50)
+        print(f"👤 ユーザー発言: {req.message}")
+        print("=" * 50)
+
+        clock = {"t_send": t_send, "idle_time": req.idle_time, "prev_end": 0.0}
+        jobs = []
+        try:
+            for i, (emotion, seg) in enumerate(iter_reply_segments(req.message)):
+                print(f"🤖 [区間{i + 1} ({emotion})] ({time.time() - total_start:.2f}秒): {seg}")
+                wav_future = tts_executor.submit(synthesize_speech, seg, 30, SEG_SILENCE, SEG_SILENCE)
+                video_future = video_executor.submit(render_segment, i, wav_future, clock)
+                jobs.append((emotion, seg, video_future))
+
+            for i, (emotion, seg, video_future) in enumerate(jobs):
+                mp4 = video_future.result()
+                print(f"📤 [区間{i + 1} 送信] ({time.time() - total_start:.2f}秒)")
+                yield json.dumps({
+                    "type": "segment",
+                    "index": i,
+                    "emotion": emotion,
+                    "text": seg,
+                    "video": base64.b64encode(mp4).decode("ascii"),
+                }) + "\n"
+            yield json.dumps({"type": "done"}) + "\n"
+        except Exception as e:
+            traceback.print_exc()
+            yield json.dumps({"type": "error", "detail": f"{type(e).__name__}: {e}"}, ensure_ascii=False) + "\n"
+        print(f"🏁 【全体の合計時間】: {time.time() - total_start:.2f}秒\n")
+
+    return StreamingResponse(event_stream(), media_type="application/x-ndjson")
+
+
+# ====================================================
+# 待機動画を Colab の口パク合成元ループと同期（顔の見た目・コマ位置を一致させる）
+# ====================================================
+def sync_idle_video():
+    global IDLE_TOTAL_FRAMES, IDLE_FPS
+    res = requests.get(f"{fetch_latest_colab_url()}/api/idle_video", headers=TUNNEL_HEADERS, timeout=30)
+    res.raise_for_status()
+    if len(res.content) < 1000:
+        raise RuntimeError("待機動画が空です")
+    dest = os.path.join(STATIC_DIR, "avatar_idle.mp4")
+    backup = os.path.join(STATIC_DIR, "avatar_idle_backup.mp4")
+    if os.path.exists(dest) and not os.path.exists(backup):
+        shutil.copy(dest, backup)  # 初回のみ、元の待機動画を退避
+    with open(dest, "wb") as f:
+        f.write(res.content)
+    IDLE_TOTAL_FRAMES = int(res.headers.get("X-Total-Frames", IDLE_TOTAL_FRAMES))
+    IDLE_FPS = float(res.headers.get("X-FPS", IDLE_FPS))
+    print(f"🔄 待機動画を Colab と同期しました ({IDLE_TOTAL_FRAMES} コマ, {IDLE_FPS} fps)")
+
+@app.post("/api/sync_idle")
+def api_sync_idle():
+    try:
+        sync_idle_video()
+        return {"status": "success", "idle_video_url": f"/static/avatar_idle.mp4?t={int(time.time())}"}
+    except Exception as e:
+        print(f"⚠️ 待機動画の同期に失敗（既存の待機動画を使います）: {e}")
+        return {"status": "skipped", "detail": str(e)}
 
 
 # ====================================================
@@ -424,6 +598,12 @@ async def upload_avatar(file: UploadFile = File(...)):
             )
             shutil.copy(result_idle_path, dest_idle_path)
             print(f"🎉 [アバター更新完了 (Gradio)] ({time.time() - t0:.2f}秒): {dest_idle_path}")
+
+        # 口パク合成元と同じ画質・コマ数の待機動画に差し替え（失敗時は上で保存したものを使う）
+        try:
+            sync_idle_video()
+        except Exception as e:
+            print(f"ℹ️ 待機動画の同期スキップ: {e}")
 
         return {
             "status": "success",

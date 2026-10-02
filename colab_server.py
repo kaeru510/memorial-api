@@ -390,7 +390,58 @@ def setup_avatar(face_img_path):
 # ==============================================================================
 # 5. 高速対話推論関数 (fast_process_pipeline)
 # ==============================================================================
-def fast_process_pipeline(face_img_path, audio_path):
+TALK_MAX_DIM = 400  # 口パク動画・待機動画の長辺（両者を同じ見た目にするため共通）
+
+def encode_frames_to_mp4(frames, out_path, audio_path=None):
+    """フレーム列を FFmpeg の標準入力へ流し込み mp4 化（口パク動画と待機動画で同じ画質設定を使う）"""
+    orig_h, orig_w, _ = frames[0].shape
+    scale = min(TALK_MAX_DIM / max(orig_h, orig_w), 1.0)
+    target_w = int(orig_w * scale) // 2 * 2
+    target_h = int(orig_h * scale) // 2 * 2
+
+    if os.path.exists(out_path):
+        os.remove(out_path)
+
+    ffmpeg_cmd = [
+        "ffmpeg", "-y",
+        "-f", "rawvideo",
+        "-vcodec", "rawvideo",
+        "-s", f"{target_w}x{target_h}",
+        "-pix_fmt", "bgr24",
+        "-r", str(cached_fps),
+        "-i", "-",
+    ]
+    if audio_path:
+        ffmpeg_cmd += ["-i", audio_path]
+    ffmpeg_cmd += [
+        "-c:v", "libx264",
+        "-preset", "ultrafast",
+        "-tune", "zerolatency",
+        "-crf", "28",
+        "-pix_fmt", "yuv420p",
+    ]
+    if audio_path:
+        ffmpeg_cmd += ["-c:a", "aac", "-b:a", "96k", "-map", "0:v:0", "-map", "1:a:0", "-shortest"]
+    ffmpeg_cmd.append(out_path)
+
+    proc = subprocess.Popen(ffmpeg_cmd, stdin=subprocess.PIPE, stderr=subprocess.DEVNULL)
+    for frame in frames:
+        if scale < 1.0:
+            frame = cv2.resize(frame, (target_w, target_h))
+        proc.stdin.write(frame.tobytes())
+    proc.stdin.close()
+    proc.wait()
+    return target_w, target_h
+
+def make_idle_video(out_path="/content/idle_for_browser.mp4"):
+    """口パク合成の元になっているループ動画を、口パク動画と同じ画質で書き出す（ブラウザの待機動画用）"""
+    if len(cached_frames) == 0:
+        raise RuntimeError("アバターがセットアップされていません。")
+    encode_frames_to_mp4(cached_frames, out_path)
+    return out_path
+
+def fast_process_pipeline(face_img_path, audio_path, start_frame=0):
+    """start_frame: ループ動画の何コマ目から合成を始めるか（区間をまたいで頭の動きを連続させる）"""
     t_start = time.time()
 
     if gpu_face_tensor is None or len(cached_frames) == 0:
@@ -414,8 +465,9 @@ def fast_process_pipeline(face_img_path, audio_path):
 
     num_frames = len(mel_chunks)
     total_cached = len(cached_frames)
-    full_frames = [cached_frames[idx % total_cached].copy() for idx in range(num_frames)]
-    coords = [cached_coords[idx % total_cached] for idx in range(num_frames)]
+    start_frame = int(start_frame) % total_cached
+    full_frames = [cached_frames[(start_frame + idx) % total_cached].copy() for idx in range(num_frames)]
+    coords = [cached_coords[(start_frame + idx) % total_cached] for idx in range(num_frames)]
 
     t_gpu = time.time()
     for i in range(0, num_frames, wav2lip_batch_size):
@@ -423,7 +475,7 @@ def fast_process_pipeline(face_img_path, audio_path):
         batch_c = coords[i:i + wav2lip_batch_size]
         cur_batch_len = len(batch_mels)
 
-        indices = [(i + k) % total_cached for k in range(cur_batch_len)]
+        indices = [(start_frame + i + k) % total_cached for k in range(cur_batch_len)]
         img_tensor = gpu_face_tensor[indices]
         mel_tensor = torch.FloatTensor(np.array(batch_mels)).unsqueeze(1).to(device)
 
@@ -441,46 +493,8 @@ def fast_process_pipeline(face_img_path, audio_path):
     gpu_sec = time.time() - t_gpu
 
     t_enc = time.time()
-    orig_h, orig_w, _ = full_frames[0].shape
-    max_dim = 400
-    scale = min(max_dim / max(orig_h, orig_w), 1.0)
-    target_w = int(orig_w * scale) // 2 * 2
-    target_h = int(orig_h * scale) // 2 * 2
-
     final_mp4 = "/content/final_synced_output.mp4"
-    if os.path.exists(final_mp4):
-        os.remove(final_mp4)
-
-    ffmpeg_cmd = [
-        "ffmpeg", "-y",
-        "-f", "rawvideo",
-        "-vcodec", "rawvideo",
-        "-s", f"{target_w}x{target_h}",
-        "-pix_fmt", "bgr24",
-        "-r", str(cached_fps),
-        "-i", "-",
-        "-i", audio_path,
-        "-c:v", "libx264",
-        "-preset", "ultrafast",
-        "-tune", "zerolatency",
-        "-crf", "28",
-        "-c:a", "aac",
-        "-b:a", "96k",
-        "-map", "0:v:0",
-        "-map", "1:a:0",
-        "-shortest",
-        final_mp4
-    ]
-
-    proc = subprocess.Popen(ffmpeg_cmd, stdin=subprocess.PIPE, stderr=subprocess.DEVNULL)
-    for frame in full_frames:
-        if scale < 1.0:
-            resized_f = cv2.resize(frame, (target_w, target_h))
-            proc.stdin.write(resized_f.tobytes())
-        else:
-            proc.stdin.write(frame.tobytes())
-    proc.stdin.close()
-    proc.wait()
+    target_w, target_h = encode_frames_to_mp4(full_frames, final_mp4, audio_path)
     enc_sec = time.time() - t_enc
 
     print(f"⚡ 推論: {gpu_sec:.2f}秒 | エンコード: {enc_sec:.2f}秒 ({target_w}x{target_h}) | 合計: {time.time() - t_start:.2f}秒")
@@ -542,22 +556,31 @@ with gr.Blocks() as demo:
 # ==============================================================================
 # 6.5. ダイレクト超高速 API (FastAPI 直結ルート) の登録
 # ==============================================================================
-from fastapi import FastAPI, UploadFile, File
+from fastapi import FastAPI, UploadFile, File, Form
 from fastapi.responses import FileResponse
 
 # demo.app に登録したルートは demo.launch() 時に作り直される App に引き継がれず 404 になる。
 # 独自の FastAPI にルートを登録し、Gradio をその上にマウントして起動する（ngrok モード時）
 api_app = FastAPI()
 
+@api_app.get("/api/idle_video")
+def api_idle_video():
+    """ブラウザ用の待機動画（口パク合成の元と同一のループ・同一画質）"""
+    path = make_idle_video()
+    return FileResponse(
+        path, media_type="video/mp4", filename="avatar_idle.mp4",
+        headers={"X-Total-Frames": str(len(cached_frames)), "X-FPS": str(cached_fps)}
+    )
+
 @api_app.post("/api/generate")
-async def api_generate(audio: UploadFile = File(...)):
+async def api_generate(audio: UploadFile = File(...), start_frame: int = Form(0)):
     t0 = time.time()
     temp_wav = f"/content/req_{int(time.time() * 1000)}.wav"
     content = await audio.read()
     with open(temp_wav, "wb") as f:
         f.write(content)
     try:
-        mp4_path = fast_process_pipeline(None, temp_wav)
+        mp4_path = fast_process_pipeline(None, temp_wav, start_frame)
         print(f"⚡ [ダイレクトAPI動画生成完了] ({time.time() - t0:.2f}秒)", flush=True)
         return FileResponse(mp4_path, media_type="video/mp4", filename="final_output.mp4")
     finally:
