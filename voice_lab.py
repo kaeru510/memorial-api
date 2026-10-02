@@ -379,7 +379,31 @@ def register(api_app, aivis_url, is_aivis_ready):
         return FileResponse(info["aivmx"], media_type="application/octet-stream", filename=f"{model_name}.aivmx")
 
 
+def shutdown_runtime():
+    """Colab のランタイム（GPU）を返却してコンピューティングユニットの消費を止める。
+    google.colab.runtime.unassign() と同じく、ランタイム管理サービスに /unassign を送る"""
+    import requests
+    job.update(state="running", detail="GPU を返却中", started=time.time())
+    _save_status()
+    addr = os.environ.get("TBE_RUNTIME_ADDR")
+    if addr:
+        try:
+            r = requests.post(f"http://{addr}/unassign", timeout=30)
+            print(f"🛑 ランタイム返却を要求: HTTP {r.status_code}", flush=True)
+            if r.ok:
+                return
+        except Exception as e:
+            print(f"⚠️ ランタイム返却の要求に失敗: {e}", flush=True)
+    # 返却できない場合: サーバー類を止めてセルを終わらせる（あとは Colab のアイドル切断を待つ）
+    for pat in ("ngrok http", "run.py --use_gpu", "cloudflared tunnel", "colab_server.py"):
+        subprocess.run(["pkill", "-f", pat], check=False)
+
+
 if __name__ == "__main__":
     # python voice_lab.py train <model> <epochs> <aivis_url>
+    #   model が __shutdown__ のときは学習せず、ランタイム（GPU）を返却する
     if len(sys.argv) >= 5 and sys.argv[1] == "train":
-        run_job(sys.argv[2], int(sys.argv[3]), sys.argv[4])
+        if sys.argv[2] == "__shutdown__":
+            shutdown_runtime()
+        else:
+            run_job(sys.argv[2], int(sys.argv[3]), sys.argv[4])
