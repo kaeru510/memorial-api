@@ -299,7 +299,7 @@ def read_root():
 # ====================================================
 # Colab GPU による口パク動画生成（ダイレクトAPI優先、失敗時 Gradio Client）
 # ====================================================
-def generate_video(audio_path, out_path, start_frame=0, emotion="normal"):
+def generate_video(audio_path, out_path, start_frame=0, emotion="normal", ramp_in=0):
     """start_frame: ループ動画の何コマ目から合成するか（ダイレクトAPIのみ対応）"""
     global gradio_client
     t0 = time.time()
@@ -311,7 +311,7 @@ def generate_video(audio_path, out_path, start_frame=0, emotion="normal"):
             res = requests.post(
                 f"{colab_url}/api/generate",
                 files={"audio": ("output.wav", f, "audio/wav")},
-                data={"start_frame": str(int(start_frame)), "emotion": emotion},
+                data={"start_frame": str(int(start_frame)), "emotion": emotion, "ramp_in": str(ramp_in)},
                 headers=TUNNEL_HEADERS,
                 timeout=20
             )
@@ -464,6 +464,10 @@ IDLE_TOTAL_FRAMES = 750   # Colab のループ動画のコマ数（/api/sync_idl
 IDLE_FPS = 25.0
 render_sec_ema = 1.4      # 動画生成+転送の所要秒数の移動平均（再生開始時刻の見積もりに使う）
 SEG_SILENCE = 0.05        # 区間の前後につける無音（秒）。標準は約0.1〜0.17秒
+EMOTION_RAMP_FRAMES = 20  # 返事の最初の区間で、通常の顔から感情の顔へ移すコマ数（0.8秒）。急に変わると不気味に見える
+
+def ramp_for(index, emotion):
+    return EMOTION_RAMP_FRAMES if index == 0 and emotion != "normal" else 0
 
 class ChatStreamRequest(BaseModel):
     message: str
@@ -488,7 +492,7 @@ def render_segment(index, wav_future, clock, emotion="normal"):
     clock["prev_end"] = play_at + wav_duration(wav_bytes)
     start_frame = round((clock["idle_time"] + (play_at - clock["t_send"])) * IDLE_FPS) % IDLE_TOTAL_FRAMES
 
-    generate_video(wav_path, mp4_path, start_frame, emotion)
+    generate_video(wav_path, mp4_path, start_frame, emotion, ramp_for(index, emotion))
     render_sec_ema = 0.7 * render_sec_ema + 0.3 * (time.time() - now)
     with open(mp4_path, "rb") as f:
         return f.read()
@@ -535,7 +539,8 @@ def render_segment_remote(index, text, clock, emotion="normal"):
             f"{fetch_latest_colab_url()}/api/generate_from_text",
             data={"text": text, "speaker": str(EMOTION_STYLE_IDS[emotion]), "emotion": emotion, "speed": "1.22",
                   "pre_silence": str(SEG_SILENCE), "post_silence": str(SEG_SILENCE),
-                  "start_frame": str(start_frame), "turn_id": clock["turn_id"], "seg_index": str(index)},
+                  "start_frame": str(start_frame), "turn_id": clock["turn_id"], "seg_index": str(index),
+                  "ramp_in": str(ramp_for(index, emotion))},
             headers=TUNNEL_HEADERS,
             timeout=20
         )
@@ -614,13 +619,29 @@ def sync_idle_video():
         f.write(res.content)
     IDLE_TOTAL_FRAMES = int(res.headers.get("X-Total-Frames", IDLE_TOTAL_FRAMES))
     IDLE_FPS = float(res.headers.get("X-FPS", IDLE_FPS))
-    print(f"🔄 待機動画を Colab と同期しました ({IDLE_TOTAL_FRAMES} コマ, {IDLE_FPS} fps)")
+
+    # 感情ごとの待機動画（返事の後、感情の顔から通常の顔へゆっくり戻す演出用）
+    emotions = []
+    for emo in ("happy", "calm", "sad"):
+        try:
+            r = requests.get(f"{fetch_latest_colab_url()}/api/idle_video", params={"emotion": emo},
+                             headers=TUNNEL_HEADERS, timeout=60)
+            if r.ok and len(r.content) > 1000:
+                with open(os.path.join(STATIC_DIR, f"avatar_idle_{emo}.mp4"), "wb") as f:
+                    f.write(r.content)
+                emotions.append(emo)
+        except Exception as e:
+            print(f"ℹ️ 感情待機動画 {emo} の同期スキップ: {e}")
+    print(f"🔄 待機動画を Colab と同期しました ({IDLE_TOTAL_FRAMES} コマ, {IDLE_FPS} fps, 感情: {emotions or 'なし'})")
+    return emotions
 
 @app.post("/api/sync_idle")
 def api_sync_idle():
     try:
-        sync_idle_video()
-        return {"status": "success", "idle_video_url": f"/static/avatar_idle.mp4?t={int(time.time())}"}
+        emotions = sync_idle_video()
+        t = int(time.time())
+        return {"status": "success", "idle_video_url": f"/static/avatar_idle.mp4?t={t}",
+                "emotion_video_urls": {e: f"/static/avatar_idle_{e}.mp4?t={t}" for e in emotions}}
     except Exception as e:
         print(f"⚠️ 待機動画の同期に失敗（既存の待機動画を使います）: {e}")
         return {"status": "skipped", "detail": str(e)}

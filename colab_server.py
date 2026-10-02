@@ -556,11 +556,13 @@ def encode_frames_to_mp4(frames, out_path, audio_path=None):
     proc.wait()
     return target_w, target_h
 
-def make_idle_video(out_path="/content/idle_for_browser.mp4"):
-    """口パク合成の元になっているループ動画を、口パク動画と同じ画質で書き出す（ブラウザの待機動画用）"""
+def make_idle_video(out_path="/content/idle_for_browser.mp4", emotion=None):
+    """口パク合成の元になっているループ動画を、口パク動画と同じ画質で書き出す（ブラウザの待機動画用）。
+    emotion を指定するとその感情ループ（返事の後に感情の顔から通常の顔へゆっくり戻す演出に使う）"""
     if len(cached_frames) == 0:
         raise RuntimeError("アバターがセットアップされていません。")
-    encode_frames_to_mp4(cached_frames, out_path)
+    frames = emotion_cache[emotion]["frames"] if emotion else cached_frames
+    encode_frames_to_mp4(frames, out_path)
     return out_path
 
 _mouth_mask_cache = {}
@@ -588,9 +590,10 @@ def count_video_frames(audio_path):
         i += 1
     return i + 1
 
-def fast_process_pipeline(face_img_path, audio_path, start_frame=0, out_path="/content/final_synced_output.mp4", emotion=None):
+def fast_process_pipeline(face_img_path, audio_path, start_frame=0, out_path="/content/final_synced_output.mp4", emotion=None, ramp_in=0):
     """start_frame: ループ動画の何コマ目から合成を始めるか（区間をまたいで頭の動きを連続させる）
-    emotion: 感情ループ（happy / calm / sad）を土台にする。未生成なら通常ループ"""
+    emotion: 感情ループ（happy / calm / sad）を土台にする。未生成なら通常ループ
+    ramp_in: 先頭の何コマで通常の顔から感情の顔へ徐々に移すか（返事の最初の区間で使い、表情の急変を防ぐ）"""
     t_start = time.time()
 
     if gpu_face_tensor is None or len(cached_frames) == 0:
@@ -619,6 +622,13 @@ def fast_process_pipeline(face_img_path, audio_path, start_frame=0, out_path="/c
     total_cached = len(cached_frames)
     start_frame = int(start_frame) % total_cached
     full_frames = [src_frames[(start_frame + idx) % total_cached].copy() for idx in range(num_frames)]
+    if emo and ramp_in > 0:
+        # 頭の位置は通常ループと一致しているので、コマごとの重ね合わせで表情だけがなめらかに移る
+        for idx in range(min(ramp_in, num_frames)):
+            a = (idx + 1) / (ramp_in + 1)
+            a = a * a * (3 - 2 * a)  # smoothstep（動き始めと終わりをゆっくり）
+            neutral = cached_frames[(start_frame + idx) % total_cached]
+            full_frames[idx] = cv2.addWeighted(neutral, 1.0 - a, full_frames[idx], a, 0)
     coords = [cached_coords[(start_frame + idx) % total_cached] for idx in range(num_frames)]
 
     t_gpu = time.time()
@@ -806,9 +816,12 @@ from fastapi.responses import FileResponse
 api_app = FastAPI()
 
 @api_app.get("/api/idle_video")
-def api_idle_video():
-    """ブラウザ用の待機動画（口パク合成の元と同一のループ・同一画質）"""
-    path = make_idle_video()
+def api_idle_video(emotion: str = ""):
+    """ブラウザ用の待機動画（口パク合成の元と同一のループ・同一画質）。?emotion=happy 等で感情ループ"""
+    if emotion and emotion not in emotion_cache:
+        from fastapi import HTTPException
+        raise HTTPException(status_code=404, detail=f"感情ループ {emotion} は未生成です")
+    path = make_idle_video(f"/content/idle_for_browser_{emotion or 'normal'}.mp4", emotion or None)
     return FileResponse(
         path, media_type="video/mp4", filename="avatar_idle.mp4",
         headers={"X-Total-Frames": str(len(cached_frames)), "X-FPS": str(cached_fps)}
@@ -843,6 +856,7 @@ def api_generate_from_text(
     start_frame: int = Form(0),
     turn_id: str = Form(""),
     emotion: str = Form(""),
+    ramp_in: int = Form(0),
     seg_index: int = Form(0),
 ):
     """テキスト → GPU音声合成 → 口パク動画 を Colab 内で一括実行（音声のアップロード往復も不要）
@@ -880,7 +894,7 @@ def api_generate_from_text(
     out_mp4 = temp_wav.replace(".wav", ".mp4")
     try:
         with gpu_lock:
-            mp4_path = fast_process_pipeline(None, temp_wav, my_start, out_mp4, emotion or None)
+            mp4_path = fast_process_pipeline(None, temp_wav, my_start, out_mp4, emotion or None, ramp_in)
         print(f"⚡ [テキスト→動画 完了] 合成 {tts_sec:.2f}秒 | 合計 {time.time() - t0:.2f}秒: {text}", flush=True)
         from starlette.background import BackgroundTask
         return FileResponse(
@@ -898,7 +912,7 @@ def api_generate_from_text(
 # 重い処理の窓口は async にしない（async 内で重い処理を直接実行すると、終わるまで
 # サーバー全体が他のリクエストに応答しなくなる。通常の def なら別スレッドで実行される）
 @api_app.post("/api/generate")
-def api_generate(audio: UploadFile = File(...), start_frame: int = Form(0), emotion: str = Form("")):
+def api_generate(audio: UploadFile = File(...), start_frame: int = Form(0), emotion: str = Form(""), ramp_in: int = Form(0)):
     t0 = time.time()
     temp_wav = f"/content/req_{int(time.time() * 1000)}.wav"
     with open(temp_wav, "wb") as f:
@@ -906,7 +920,7 @@ def api_generate(audio: UploadFile = File(...), start_frame: int = Form(0), emot
     try:
         out_mp4 = temp_wav.replace(".wav", ".mp4")
         with gpu_lock:
-            mp4_path = fast_process_pipeline(None, temp_wav, start_frame, out_mp4, emotion or None)
+            mp4_path = fast_process_pipeline(None, temp_wav, start_frame, out_mp4, emotion or None, ramp_in)
         print(f"⚡ [ダイレクトAPI動画生成完了] ({time.time() - t0:.2f}秒)", flush=True)
         from starlette.background import BackgroundTask
         return FileResponse(mp4_path, media_type="video/mp4", filename="final_output.mp4",

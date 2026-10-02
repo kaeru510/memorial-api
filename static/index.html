@@ -43,11 +43,15 @@
       transition: opacity 0.3s ease;
     }
     #idleVideo { z-index: 1; opacity: 1; }
+    /* 感情ごとの待機動画（通常の待機動画とコマ位置を揃えて裏で再生）。
+       返事の後は感情の顔のまま少し置き、1.5秒かけて通常の顔へ戻す（急に戻ると不気味に見える） */
+    .emo-idle { z-index: 1; opacity: 0; transition: opacity 1.5s ease; }
+    .emo-idle.active { opacity: 1; transition: opacity 0.1s linear; }
     .talk-video {
       z-index: 2;
       opacity: 0;
       pointer-events: none;
-      transition: opacity 0.35s ease;  /* 待機⇄会話は頭の位置が一致しているので、表情だけがなめらかに変わる */
+      transition: opacity 0.2s ease;
     }
     .talk-video.active {
       opacity: 1;
@@ -252,9 +256,56 @@
       if (data.status === "success") {
         idleVideo.src = data.idle_video_url;
         idleVideo.play().catch(() => {});
+        setupEmotionIdle(data.emotion_video_urls || {});
       }
     })
     .catch(() => {});
+
+  // ====================================================
+  // 感情ごとの待機動画
+  // ====================================================
+  const emoIdleVideos = {};   // emotion -> video 要素
+  let replyEmotion = "normal";
+  let emoFadeTimer = null;
+
+  function setupEmotionIdle(urls) {
+    const talk = document.getElementById("talkVideo");
+    for (const [emo, url] of Object.entries(urls)) {
+      let v = emoIdleVideos[emo];
+      if (!v) {
+        v = document.createElement("video");
+        v.className = "avatar-video emo-idle";
+        v.muted = true; v.loop = true; v.playsInline = true; v.autoplay = true;
+        talk.parentNode.insertBefore(v, talk);  // 通常の待機動画より上、会話動画より下
+        emoIdleVideos[emo] = v;
+      }
+      v.src = url;
+      v.play().catch(() => {});
+    }
+  }
+
+  // 通常の待機動画と再生位置を揃える（頭の位置を一致させるため）
+  function syncEmotionIdle() {
+    for (const v of Object.values(emoIdleVideos)) {
+      if (Math.abs(v.currentTime - idleVideo.currentTime) > 0.08) v.currentTime = idleVideo.currentTime;
+    }
+  }
+  setInterval(syncEmotionIdle, 2000);
+
+  function showEmotionIdle(emo) {
+    const v = emoIdleVideos[emo];
+    if (!v) return;
+    clearTimeout(emoFadeTimer);
+    syncEmotionIdle();
+    v.classList.add("active");
+  }
+
+  function hideEmotionIdle(delayMs = 0) {
+    clearTimeout(emoFadeTimer);
+    emoFadeTimer = setTimeout(() => {
+      Object.values(emoIdleVideos).forEach(v => v.classList.remove("active"));
+    }, delayMs);
+  }
 
   const talkVideos = [document.getElementById("talkVideo"), document.getElementById("talkVideo2")];
   const textInput = document.getElementById("textInput");
@@ -368,6 +419,11 @@
 
   function finishTalk() {
     currentTalk = null;
+    // 感情の顔のまま 1.2 秒置いてから、1.5 秒かけて通常の顔へ戻す
+    if (replyEmotion !== "normal" && emoIdleVideos[replyEmotion]) {
+      showEmotionIdle(replyEmotion);
+      hideEmotionIdle(1200);
+    }
     talkVideos.forEach(v => v.classList.remove("active", "front"));
     idleVideo.play();
     statusDot.className = "status-dot";
@@ -380,7 +436,8 @@
     if (segQueue.length > 0) {
       playNextSegment();
     } else if (!streamDone) {
-      // 次の区間がまだ届いていない → いったん待機動画に戻して到着を待つ
+      // 次の区間がまだ届いていない → 感情の顔の待機動画で到着を待つ
+      showEmotionIdle(replyEmotion);
       v.classList.remove("active", "front");
       currentTalk = null;
       idleVideo.play();
@@ -439,6 +496,9 @@
 
     segQueue = [];
     streamDone = false;
+    // 前の返事の感情の顔が残っていれば、考えている間にゆっくり通常の顔へ戻す
+    replyEmotion = "normal";
+    hideEmotionIdle(0);
     let replyText = "";
 
     // サーバーから届いた1行（NDJSON）を処理
@@ -447,6 +507,7 @@
         if (ev.index === 0) {
           clearInterval(progressInterval);
           replyText = emotionIcons[ev.emotion] || "";
+          replyEmotion = ev.emotion || "normal";
         }
         replyText += ev.text;
         subtitle.innerText = `AI: ${replyText}`;
@@ -530,6 +591,10 @@
       idleVideo.src = data.idle_video_url;
       idleVideo.load();
       await idleVideo.play();
+      // 新しいアバターの感情ごとの待機動画も読み込み直す
+      fetch("/api/sync_idle", { method: "POST" }).then(r => r.json())
+        .then(d => { if (d.status === "success") setupEmotionIdle(d.emotion_video_urls || {}); })
+        .catch(() => {});
 
       subtitle.innerText = "✨ 新しいアバターへの切り替えが完了しました！話しかけてみてください。";
       statusDot.className = "status-dot";
