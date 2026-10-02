@@ -166,12 +166,18 @@ def train(model, epochs=100, batch=4, save_every=500, install_fn=None):
         # 握りつぶすことがあるので、ここで有無を確かめ、無ければ該当部分のログを付けて止める
         npys = glob.glob(f"{data_dir}/wavs/**/*.npy", recursive=True)
         if not npys:
+            # preprocess_all は style_gen がエラー出力付きで終わっても成功扱いにするため、単独で実行し直してエラーを表に出す
+            _log("スタイル特徴を単独で作り直し中...")
+            _run([SBV2_PY, "style_gen.py", "--config", f"{data_dir}/config.json", "--num_processes", "1"],
+                 cwd=SBV2_DIR)
+            npys = glob.glob(f"{data_dir}/wavs/**/*.npy", recursive=True)
+        if not npys:
             log = open(LOG_PATH, encoding="utf-8", errors="ignore").read()
             i = log.rfind("style_gen")
             elsewhere = glob.glob(f"{data_dir}/**/*.npy", recursive=True)[:3]
             wavs = glob.glob(f"{data_dir}/wavs/**/*.wav", recursive=True)[:3]
             raise RuntimeError(f"スタイル特徴ファイルが作られていません。wavs例={wavs} 他の場所のnpy={elsewhere}\n"
-                               f"--- style_gen のログ ---\n{log[i:i + 3000] if i >= 0 else log[-3000:]}")
+                               f"--- style_gen のログ ---\n{log[-3500:]}")
     else:
         _log("前回の続きから学習を再開します")
 
