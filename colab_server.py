@@ -1063,6 +1063,16 @@ def api_setup_avatar_status():
         st["elapsed"] = round(time.time() - st["started"], 1)
     return st
 
+# 声の学習（Style-Bert-VITS2 の追加学習）用 API。失敗してもサーバー本体には影響させない
+try:
+    if "/content/memorial-api" not in sys.path:
+        sys.path.append("/content/memorial-api")
+    import voice_lab
+    voice_lab.register(api_app, AIVIS_LOCAL_URL, lambda: aivis_state["ready"])
+    print("✅ 声の学習 API を登録しました (/api/voice/*)")
+except Exception as e:
+    print(f"⚠️ 声の学習 API の登録をスキップ: {e}")
+
 # ==============================================================================
 # 7. 高速トンネル (Cloudflare) ＆ URL自動クラウド同期
 # ==============================================================================

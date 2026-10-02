@@ -45,3 +45,6 @@ colab_url.txt
 # 声の学習用の録音・作業ファイル（個人の声なので公開しない）。台本だけは管理する
 voice_data/*
 !voice_data/読み上げ台本.md
+
+# 選択中の声（ローカル設定）
+voice_setting.json

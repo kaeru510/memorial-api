@@ -238,6 +238,7 @@
 
     <div class="colab-status-row">
       <span id="colabStatusText">🌐 Colab: 接続確認中...</span>
+      <select id="voiceSelect" class="colab-edit-btn" title="声の切り替え" onchange="selectVoice(this.value)"></select>
       <button class="colab-edit-btn" onclick="editColabUrl()" title="Colab URLを手動で変更">✏️ URL変更</button>
     </div>
   </div>
@@ -613,6 +614,29 @@
   }
 
   // Colab URL の自動監視と手動変更
+  // 声の切り替え（まお ⇔ 学習した声）
+  async function loadVoices() {
+    try {
+      const data = await (await fetch("/api/voices")).json();
+      const sel = document.getElementById("voiceSelect");
+      sel.innerHTML = data.voices.map(v => `<option value="${v}">🎙️ ${v === "mao" ? "まお（標準）" : v}</option>`).join("");
+      sel.value = data.current;
+    } catch (e) {}
+  }
+  async function selectVoice(voice) {
+    try {
+      const res = await fetch("/api/voices/select", {
+        method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ voice })
+      });
+      if (!res.ok) throw new Error((await res.json()).detail || "切り替えに失敗しました");
+      subtitle.innerText = `🎙️ 声を ${voice === "mao" ? "まお" : voice} に切り替えました`;
+    } catch (e) {
+      alert(e.message);
+      loadVoices();
+    }
+  }
+  loadVoices();
+
   async function checkColabUrl() {
     try {
       const res = await fetch("/api/colab_url");

@@ -778,6 +778,83 @@ def setup_emotions():
 
 
 # ====================================================
+# 声の切り替え（まお ⇔ 学習した声）
+#   学習した声は Colab の /api/voice/models にスタイル名 → スタイルIDが登録される。
+#   感情（normal/happy/calm/sad）と同じ名前のスタイルがあればそれを使い、なければ Neutral を使う
+# ====================================================
+MAO_STYLE_IDS = dict(EMOTION_STYLE_IDS)
+VOICE_SETTING_FILE = os.path.join(BASE_DIR, "voice_setting.json")
+current_voice = "mao"
+
+def colab_voice_models():
+    try:
+        r = requests.get(f"{fetch_latest_colab_url()}/api/voice/models", headers=TUNNEL_HEADERS, timeout=10)
+        return r.json() if r.ok else {}
+    except Exception:
+        return {}
+
+def install_voice_locally(model_name):
+    """ローカルの AivisSpeech にも学習した声を入れる（Colab の GPU 合成が使えないときの予備用）"""
+    try:
+        r = requests.get(f"{fetch_latest_colab_url()}/api/voice/aivmx", params={"model_name": model_name},
+                         headers=TUNNEL_HEADERS, timeout=120)
+        r.raise_for_status()
+        res = requests.post(f"{AIVIS_URL}/aivm_models/install",
+                            files={"file": (f"{model_name}.aivmx", r.content)}, timeout=300)
+        print(f"🎙️ ローカル音声エンジンへの登録: HTTP {res.status_code}")
+    except Exception as e:
+        print(f"ℹ️ ローカル音声エンジンへの登録をスキップ（予備用のため会話には影響なし）: {e}")
+
+def select_voice(voice):
+    global current_voice
+    if voice == "mao":
+        EMOTION_STYLE_IDS.update(MAO_STYLE_IDS)
+    else:
+        info = colab_voice_models().get(voice)
+        if not info or not info.get("styles"):
+            raise HTTPException(status_code=404, detail=f"学習済みの声 {voice} が Colab にありません")
+        styles = info["styles"]
+        fallback = styles.get("Neutral", next(iter(styles.values())))
+        EMOTION_STYLE_IDS.update({emo: styles.get(emo, fallback) for emo in MAO_STYLE_IDS})
+        threading.Thread(target=install_voice_locally, args=(voice,), daemon=True).start()
+    current_voice = voice
+    try:
+        json.dump({"voice": voice}, open(VOICE_SETTING_FILE, "w", encoding="utf-8"))
+    except Exception:
+        pass
+    print(f"🎙️ 声を切り替えました: {voice} {EMOTION_STYLE_IDS}")
+
+def restore_voice_setting():
+    """前回選んだ声を復元（Colab 側の登録を待って再試行）"""
+    try:
+        voice = json.load(open(VOICE_SETTING_FILE, encoding="utf-8")).get("voice", "mao")
+    except Exception:
+        return
+    if voice == "mao":
+        return
+    for _ in range(60):
+        try:
+            select_voice(voice)
+            return
+        except Exception:
+            time.sleep(10)
+
+threading.Thread(target=restore_voice_setting, daemon=True).start()
+
+class VoiceSelectRequest(BaseModel):
+    voice: str
+
+@app.get("/api/voices")
+def api_voices():
+    return {"current": current_voice, "voices": ["mao"] + sorted(colab_voice_models().keys())}
+
+@app.post("/api/voices/select")
+def api_voices_select(req: VoiceSelectRequest):
+    select_voice(req.voice)
+    return {"current": current_voice, "styles": EMOTION_STYLE_IDS}
+
+
+# ====================================================
 # Colab URL 取得・手動設定エンドポイント
 # ====================================================
 class SetUrlRequest(BaseModel):
