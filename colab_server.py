@@ -440,7 +440,7 @@ def make_idle_video(out_path="/content/idle_for_browser.mp4"):
     encode_frames_to_mp4(cached_frames, out_path)
     return out_path
 
-def fast_process_pipeline(face_img_path, audio_path, start_frame=0):
+def fast_process_pipeline(face_img_path, audio_path, start_frame=0, out_path="/content/final_synced_output.mp4"):
     """start_frame: ループ動画の何コマ目から合成を始めるか（区間をまたいで頭の動きを連続させる）"""
     t_start = time.time()
 
@@ -493,7 +493,7 @@ def fast_process_pipeline(face_img_path, audio_path, start_frame=0):
     gpu_sec = time.time() - t_gpu
 
     t_enc = time.time()
-    final_mp4 = "/content/final_synced_output.mp4"
+    final_mp4 = out_path
     target_w, target_h = encode_frames_to_mp4(full_frames, final_mp4, audio_path)
     enc_sec = time.time() - t_enc
 
@@ -586,15 +586,14 @@ def aivis_setup_worker():
         subprocess.run(["uv", "sync", "--no-default-groups", "-q"], cwd=AIVIS_DIR, check=True)
 
         # モデル配置（ソース実行時の保存先は AivisSpeech-Engine-Dev）
-        for app_name in ("AivisSpeech-Engine-Dev", "AivisSpeech-Engine"):
-            model_dir = os.path.expanduser(f"~/.local/share/{app_name}/Models")
-            os.makedirs(model_dir, exist_ok=True)
-            for uuid in AIVIS_MODEL_UUIDS:
-                dest = os.path.join(model_dir, f"{uuid.strip()}.aivmx")
-                if not os.path.exists(dest):
-                    step(f"音声モデルをダウンロード中 ({uuid.strip()[:8]})...")
-                    subprocess.run(["curl", "-sL", "-o", dest,
-                                    f"https://api.aivis-project.com/v1/aivm-models/{uuid.strip()}/download?model_type=AIVMX"], check=True)
+        model_dir = os.path.expanduser("~/.local/share/AivisSpeech-Engine-Dev/Models")
+        os.makedirs(model_dir, exist_ok=True)
+        for uuid in AIVIS_MODEL_UUIDS:
+            dest = os.path.join(model_dir, f"{uuid.strip()}.aivmx")
+            if not os.path.exists(dest):
+                step(f"音声モデルをダウンロード中 ({uuid.strip()[:8]})...")
+                subprocess.run(["curl", "-sL", "-o", dest,
+                                f"https://api.aivis-project.com/v1/aivm-models/{uuid.strip()}/download?model_type=AIVMX"], check=True)
 
         # onnxruntime-gpu が CUDA/cuDNN を見つけられるよう、Colab の torch 同梱 NVIDIA ライブラリを渡す
         env = os.environ.copy()
@@ -662,7 +661,21 @@ def api_idle_video():
 
 @api_app.get("/api/tts_status")
 def api_tts_status():
-    return aivis_state
+    return {**aivis_state, "turn_support": True}  # turn_support: 区間の並行依頼に対応
+
+# 1回の返答（turn）の区間は並行してリクエストされる。音声合成だけは区間順に行い、
+# 各区間の開始コマ = 前の区間の終了コマ として頭の動きを連続させる。口パク合成は GPU を1本ずつ使う。
+turn_states = {}
+turn_states_lock = threading.Lock()
+gpu_lock = threading.Lock()
+
+def get_turn_state(turn_id, start_frame):
+    with turn_states_lock:
+        if turn_id not in turn_states:
+            if len(turn_states) > 50:
+                turn_states.clear()
+            turn_states[turn_id] = {"cond": threading.Condition(), "next_index": 0, "next_frame": start_frame}
+        return turn_states[turn_id]
 
 @api_app.post("/api/generate_from_text")
 def api_generate_from_text(
@@ -672,26 +685,51 @@ def api_generate_from_text(
     pre_silence: float = Form(0.05),
     post_silence: float = Form(0.05),
     start_frame: int = Form(0),
+    turn_id: str = Form(""),
+    seg_index: int = Form(0),
 ):
-    """テキスト → GPU音声合成 → 口パク動画 を Colab 内で一括実行（音声のアップロード往復も不要）"""
+    """テキスト → GPU音声合成 → 口パク動画 を Colab 内で一括実行（音声のアップロード往復も不要）
+    turn_id を指定すると、同じ返答の区間を並行で受け付け、区間順にコマ位置を連結する（start_frame は区間0のみ使用）"""
     if not aivis_state["ready"]:
         from fastapi import HTTPException
         raise HTTPException(status_code=503, detail=f"GPU音声合成は未準備: {aivis_state['detail']}")
+    import wave as _wave
     t0 = time.time()
-    wav_bytes = aivis_synthesize(text, speaker, speed, pre_silence, post_silence)
-    tts_sec = time.time() - t0
-    temp_wav = f"/content/req_{int(time.time() * 1000)}.wav"
-    with open(temp_wav, "wb") as f:
-        f.write(wav_bytes)
-    try:
-        import wave as _wave
+    temp_wav = f"/content/req_{turn_id or 'x'}_{seg_index}_{int(time.time() * 1000)}.wav"
+
+    def synth_to_file():
+        wav_bytes = aivis_synthesize(text, speaker, speed, pre_silence, post_silence)
+        with open(temp_wav, "wb") as f:
+            f.write(wav_bytes)
         with _wave.open(temp_wav) as w:
-            duration = w.getnframes() / w.getframerate()
-        mp4_path = fast_process_pipeline(None, temp_wav, start_frame)
+            return w.getnframes() / w.getframerate()
+
+    if turn_id:
+        st = get_turn_state(turn_id, start_frame)
+        with st["cond"]:
+            st["cond"].wait_for(lambda: st["next_index"] >= seg_index, timeout=15)
+            try:
+                duration = synth_to_file()
+                my_start = st["next_frame"]
+                st["next_frame"] = my_start + int(round(duration * cached_fps))
+            finally:
+                st["next_index"] = max(st["next_index"], seg_index + 1)
+                st["cond"].notify_all()
+    else:
+        duration = synth_to_file()
+        my_start = start_frame
+    tts_sec = time.time() - t0
+
+    out_mp4 = temp_wav.replace(".wav", ".mp4")
+    try:
+        with gpu_lock:
+            mp4_path = fast_process_pipeline(None, temp_wav, my_start, out_mp4)
         print(f"⚡ [テキスト→動画 完了] 合成 {tts_sec:.2f}秒 | 合計 {time.time() - t0:.2f}秒: {text}", flush=True)
+        from starlette.background import BackgroundTask
         return FileResponse(
             mp4_path, media_type="video/mp4", filename="final_output.mp4",
-            headers={"X-Audio-Duration": f"{duration:.3f}", "X-TTS-Sec": f"{tts_sec:.3f}"}
+            headers={"X-Audio-Duration": f"{duration:.3f}", "X-TTS-Sec": f"{tts_sec:.3f}"},
+            background=BackgroundTask(lambda: os.path.exists(mp4_path) and os.remove(mp4_path))
         )
     finally:
         if os.path.exists(temp_wav):
