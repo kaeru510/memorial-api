@@ -82,7 +82,7 @@ def setup_sbv2():
         _run(["uv", "venv", "-q", "-p", "3.11", SBV2_VENV])
     _run(["uv", "pip", "install", "-q", "--python", SBV2_PY, "-r", f"{SBV2_DIR}/requirements-colab.txt", "aivmlib",
           "setuptools<81", "tensorboard", "GPUtil", "psutil",
-          "torch==2.8.*", "torchaudio==2.8.*", "torchvision==0.23.*", "huggingface_hub<1.0", "transformers<5"])
+          "torch==2.8.*", "torchaudio==2.8.*", "torchvision==0.23.*", "huggingface_hub<1.0", "transformers<5", "soxr"])
     _log("事前学習モデルと BERT をダウンロード中...")
     _run([SBV2_PY, "initialize.py", "--skip_default_models"], cwd=SBV2_DIR)
     import yaml
@@ -138,7 +138,8 @@ def train(model, epochs=100, batch=4, save_every=500, install_fn=None):
     # requirements-colab.txt は Colab 標準環境に入っている部品を省いているため、専用環境で足りないものを補う
     #   pkg_resources: pyopenjtalk が使う（新しい setuptools では取り除かれたので古い版）
     #   tensorboard / GPUtil / psutil: 学習スクリプトが使う
-    needed = {"pkg_resources": "setuptools<81", "tensorboard": "tensorboard", "GPUtil": "GPUtil", "psutil": "psutil"}
+    needed = {"pkg_resources": "setuptools<81", "tensorboard": "tensorboard", "GPUtil": "GPUtil", "psutil": "psutil",
+              "soxr": "soxr"}  # soxr: transformers の音声処理が import する
     missing = [pkg for mod, pkg in needed.items()
                if subprocess.run([SBV2_PY, "-c", f"import {mod}"], capture_output=True).returncode != 0]
     # pyannote.audio（スタイル特徴の抽出）は torchaudio.AudioMetaData を使うが、torchaudio 2.9 で削除された。
