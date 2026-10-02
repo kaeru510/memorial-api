@@ -624,8 +624,8 @@ AIVIS_DIR = "/content/AivisSpeech-Engine"
 AIVIS_PORT = 10101
 AIVIS_LOCAL_URL = f"http://127.0.0.1:{AIVIS_PORT}"
 AIVIS_LOG = "/content/aivis_engine.log"
-# ローカルで使っているモデル（コハク）。AivisHub から直接ダウンロードする
-AIVIS_MODEL_UUIDS = os.environ.get("AIVIS_MODEL_UUIDS", "22e8ed77-94fe-4ef2-871f-a86f94e9a579").split(",")
+# ローカルで使っているモデル（まお。スピーカーID 888753760 = まお・ノーマル）。AivisHub から直接ダウンロードする
+AIVIS_MODEL_UUIDS = os.environ.get("AIVIS_MODEL_UUIDS", "a59cb814-0083-4369-8542-f51a29e72af7").split(",")
 AIVIS_WARM_SPEAKER = int(os.environ.get("AIVIS_WARM_SPEAKER", "888753760"))
 aivis_state = {"ready": False, "detail": "未起動", "warm_synth_sec": None}
 
