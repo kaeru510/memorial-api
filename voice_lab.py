@@ -80,7 +80,8 @@ def setup_sbv2():
     _run(["pip", "install", "-q", "uv"])
     if not os.path.exists(SBV2_PY):
         _run(["uv", "venv", "-q", "-p", "3.11", SBV2_VENV])
-    _run(["uv", "pip", "install", "-q", "--python", SBV2_PY, "-r", f"{SBV2_DIR}/requirements-colab.txt", "aivmlib"])
+    _run(["uv", "pip", "install", "-q", "--python", SBV2_PY, "-r", f"{SBV2_DIR}/requirements-colab.txt", "aivmlib",
+          "setuptools<81"])
     _log("事前学習モデルと BERT をダウンロード中...")
     _run([SBV2_PY, "initialize.py", "--skip_default_models"], cwd=SBV2_DIR)
     import yaml
@@ -128,6 +129,12 @@ def train(model, epochs=100, batch=4, save_every=500, install_fn=None):
         raise RuntimeError(f"学習データがありません: {data_dir}/esd.list")
     n_utt = sum(1 for line in open(f"{data_dir}/esd.list", encoding="utf-8") if line.strip())
     job["total_steps"] = (n_utt // batch + (n_utt % batch > 0)) * epochs
+
+    # pyopenjtalk が pkg_resources を使うが、新しい setuptools では取り除かれているため古い版を入れる
+    if subprocess.run([SBV2_PY, "-c", "import pkg_resources"], capture_output=True).returncode != 0:
+        _log("不足している部品（setuptools<81）を追加中...")
+        os.environ["PATH"] = "/root/.local/bin:/root/.cargo/bin:" + os.environ["PATH"]
+        _run(["uv", "pip", "install", "-q", "--python", SBV2_PY, "setuptools<81"])
 
     resumed = bool(glob.glob(f"{data_dir}/models/G_*.pth"))
     if not resumed:
