@@ -43,14 +43,22 @@ def get_rotation_matrix_np(pitch_deg, yaw_deg, roll_deg):
     return np.ascontiguousarray(rot.T[np.newaxis, ...], dtype=np.float32)
 
 
-def expression_offsets(smile=0.0, eyebrow=0.0, mouth=0.0):
+def expression_offsets(smile=0.0, eyebrow=0.0, mouth=0.0, eyes=0.0):
     """表情パラメータ → LivePortrait の表情キーポイント差分 exp (1, 21, 3)
     係数は ComfyUI-AdvancedLivePortrait の表情エディタ（calc_fe）に準拠。
       smile:   -0.3〜1.3 程度（正で口角が上がる、負で下がる）
       eyebrow: -10〜15 程度（正で眉が上がる、負で眉を寄せる）
       mouth:   0〜 （口の開き）
+      eyes:    -20〜5 程度（まぶた。符号と強さは試し撮りで確認して使う）
     """
     e = np.zeros((1, 21, 3), dtype=np.float32)
+    e[0, 11, 1] += eyes * -0.001
+    e[0, 13, 1] += eyes * 0.0003
+    e[0, 15, 1] += eyes * -0.001
+    e[0, 16, 1] += eyes * 0.0003
+    e[0, 1, 1] += eyes * -0.00025
+    e[0, 2, 1] += eyes * 0.00025
+
     e[0, 20, 1] += smile * -0.01
     e[0, 14, 1] += smile * -0.02
     e[0, 17, 1] += smile * 0.0065
@@ -81,10 +89,15 @@ def generate_procedural_motion(
     fps=25,
     emotion=None,
     expression=None,
-    eye_open=1.0
+    eye_open=1.0,
+    blink_eyes=None
 ):
     """
     数式によって自律的なモーションテンプレート辞書を生成
+
+    blink_eyes: 指定すると、まばたきを表情キーポイント（expression_offsets の eyes）で表現する。
+        閉眼時の eyes の値（例 -20）。LivePortrait の --flag_eye_retargeting を使うと
+        相対モーションでは頭の動きや表情が捨てられるため、こちらを使う。
 
     Parameters:
         motion_type: "idle", "nod", "happy", "curious"
@@ -180,6 +193,11 @@ def generate_procedural_motion(
             exp_vec[0, 20, 1] -= 0.015
         if expr_vec is not None:
             exp_vec = exp_vec + expr_vec
+        if blink_eyes is not None:
+            # 0=開眼 〜 1=閉眼 の閉じ具合（目の開きの基準からの割合）
+            closed = 1.0 - min(float(eye_ratio[i]) / (0.38 * eye_open), 1.0)
+            if closed > 0:
+                exp_vec = exp_vec + expression_offsets(eyes=blink_eyes * closed)
 
         item_dct = {
             'scale': scale_vec,
@@ -214,7 +232,8 @@ def save_procedural_motion_template(
     emotion=None,
     wrap_pad_frames=0,
     expression=None,
-    eye_open=1.0
+    eye_open=1.0,
+    blink_eyes=None
 ):
     """
     指定パスに LivePortrait 互換 .pkl モーションテンプレートを出力保存
@@ -228,7 +247,8 @@ def save_procedural_motion_template(
         fps=fps,
         emotion=emotion,
         expression=expression,
-        eye_open=eye_open
+        eye_open=eye_open,
+        blink_eyes=blink_eyes
     )
     p = wrap_pad_frames
     if p > 0:

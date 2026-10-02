@@ -249,10 +249,11 @@ def precompute_face_tensor(frames, coords):
 # ------------------------------------------------------------------------------
 import json
 EMOTION_NAMES = ("happy", "calm", "sad")
+# 目を細める等も表情キーポイント（expression の eyes）で指定する（eye_open は目の調整機能を使う場合のみ有効）
 DEFAULT_EMOTION_PRESETS = {
-    "happy": {"expression": {"smile": 0.9, "eyebrow": 3.0}, "eye_open": 0.85},
-    "calm": {"expression": {"smile": 0.35}, "eye_open": 0.92},
-    "sad": {"expression": {"smile": -0.3, "eyebrow": -6.0}, "eye_open": 0.8},
+    "happy": {"expression": {"smile": 0.9, "eyebrow": 3.0}},
+    "calm": {"expression": {"smile": 0.35}},
+    "sad": {"expression": {"smile": -0.3, "eyebrow": -6.0}},
 }
 EMOTION_PRESETS_FILE = f"{DRIVE_DIR}/emotion_presets.json"
 emotion_presets = dict(DEFAULT_EMOTION_PRESETS)
@@ -328,6 +329,18 @@ load_emotion_caches()
 IDLE_LOOP_SEC = 8.0 if device == 'cpu' else 32.0  # 8 の倍数秒: 全周期が揃い、順再生で継ぎ目のないループになる
 IDLE_LOOP_PAD = 25  # 前後1秒の余白（LivePortrait の平滑化の端の影響を切り落とす）
 
+# LivePortrait の --flag_eye_retargeting は相対モーション時に「元画像＋目の変化」だけを使い、
+# テンプレートの頭の動き・呼吸・表情をすべて捨てる。既定ではオフにして、まばたきは表情キーポイントで作る。
+# 値は試し撮りで調整できるよう Drive の motion_settings.json で上書き可能
+MOTION_SETTINGS_FILE = "/content/drive/MyDrive/lipsync_avatar/motion_settings.json"
+motion_settings = {"eye_retargeting": False, "blink_eyes": -20.0}
+try:
+    if os.path.exists(MOTION_SETTINGS_FILE):
+        import json as _json
+        motion_settings.update(_json.load(open(MOTION_SETTINGS_FILE, encoding="utf-8")))
+except Exception as e:
+    print(f"⚠️ モーション設定の読み込みをスキップ: {e}")
+
 def render_idle_loop_frames(face_img_path, expression=None, eye_open=1.0, tag="idle", duration=None):
     """待機モーション（＋任意の表情）を LivePortrait で動画化し、余白を除いたループのフレーム列と fps を返す。
     expression 以外（頭の動き・まばたき）は常に同じなので、表情違いのループ同士はコマ単位で頭の位置が一致する"""
@@ -339,8 +352,10 @@ def render_idle_loop_frames(face_img_path, expression=None, eye_open=1.0, tag="i
 
     duration = duration or IDLE_LOOP_SEC
     pkl = f"/content/procedural_{tag}.pkl"
+    use_retarget = bool(motion_settings.get("eye_retargeting"))
     save_procedural_motion_template(pkl, motion_type="idle", duration_sec=duration, fps=25,
-                                    wrap_pad_frames=IDLE_LOOP_PAD, expression=expression, eye_open=eye_open)
+                                    wrap_pad_frames=IDLE_LOOP_PAD, expression=expression, eye_open=eye_open,
+                                    blink_eyes=None if use_retarget else motion_settings.get("blink_eyes", -20.0))
 
     lp_output_dir = os.path.join(LIVEPORTRAIT_DIR, "animations")
     os.makedirs(lp_output_dir, exist_ok=True)
@@ -351,8 +366,9 @@ def render_idle_loop_frames(face_img_path, expression=None, eye_open=1.0, tag="i
         "--flag_relative_motion",
         "--flag_do_crop",
         "--driving_option", "expression-friendly",
-        "--flag_eye_retargeting"
     ]
+    if use_retarget:
+        lp_cmd.append("--flag_eye_retargeting")
     if device == 'cpu':
         lp_cmd.append("--flag_force_cpu")
         print("⚠️ CPUモードのため LivePortrait に --flag_force_cpu を適用します", flush=True)
@@ -983,6 +999,21 @@ def api_set_emotion_presets(presets: dict):
         print(f"⚠️ 感情プリセットの保存に失敗: {e}")
     return emotion_presets
 
+@api_app.get("/api/motion_settings")
+def api_get_motion_settings():
+    return motion_settings
+
+@api_app.post("/api/motion_settings")
+def api_set_motion_settings(settings: dict):
+    """待機モーションの設定（eye_retargeting / blink_eyes）を更新。Drive に保存し次回起動時も使う"""
+    motion_settings.update({k: v for k, v in settings.items() if k in ("eye_retargeting", "blink_eyes")})
+    try:
+        os.makedirs(os.path.dirname(MOTION_SETTINGS_FILE), exist_ok=True)
+        json.dump(motion_settings, open(MOTION_SETTINGS_FILE, "w", encoding="utf-8"), indent=1)
+    except Exception as e:
+        print(f"⚠️ モーション設定の保存に失敗: {e}")
+    return motion_settings
+
 preview_lock = threading.Lock()
 
 @api_app.post("/api/expression_preview")
@@ -996,12 +1027,13 @@ def api_expression_preview(image: UploadFile = File(...), preset: str = Form("{}
         with preview_lock:
             frames, _ = render_idle_loop_frames(temp_img, expression=p.get("expression"),
                                                 eye_open=p.get("eye_open", 1.0), tag="preview", duration=2.0)
-        shot = frames[10]
-        ref = cached_frames[10] if len(cached_frames) > 10 else shot
-        if ref.shape != shot.shape:
-            ref = cv2.resize(ref, (shot.shape[1], shot.shape[0]))
+        # 左から: 現在の通常ループ / 試し撮り（0.4秒時点） / 試し撮り（まばたきで目を閉じる 1.28秒時点） / 試し撮り（1.8秒時点）
+        shots = [frames[i] for i in (10, 32, 45) if i < len(frames)]
+        ref = cached_frames[10] if len(cached_frames) > 10 else shots[0]
+        if ref.shape != shots[0].shape:
+            ref = cv2.resize(ref, (shots[0].shape[1], shots[0].shape[0]))
         out_png = temp_img.replace(".jpg", ".png")
-        cv2.imwrite(out_png, np.hstack([ref, shot]))
+        cv2.imwrite(out_png, np.hstack([ref] + shots))
         from starlette.background import BackgroundTask
         return FileResponse(out_png, media_type="image/png",
                             background=BackgroundTask(lambda: os.path.exists(out_png) and os.remove(out_png)))
