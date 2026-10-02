@@ -81,7 +81,8 @@ def setup_sbv2():
     if not os.path.exists(SBV2_PY):
         _run(["uv", "venv", "-q", "-p", "3.11", SBV2_VENV])
     _run(["uv", "pip", "install", "-q", "--python", SBV2_PY, "-r", f"{SBV2_DIR}/requirements-colab.txt", "aivmlib",
-          "setuptools<81", "tensorboard", "GPUtil", "psutil"])
+          "setuptools<81", "tensorboard", "GPUtil", "psutil",
+          "torch==2.8.*", "torchaudio==2.8.*", "torchvision==0.23.*"])
     _log("事前学習モデルと BERT をダウンロード中...")
     _run([SBV2_PY, "initialize.py", "--skip_default_models"], cwd=SBV2_DIR)
     import yaml
@@ -140,8 +141,12 @@ def train(model, epochs=100, batch=4, save_every=500, install_fn=None):
     needed = {"pkg_resources": "setuptools<81", "tensorboard": "tensorboard", "GPUtil": "GPUtil", "psutil": "psutil"}
     missing = [pkg for mod, pkg in needed.items()
                if subprocess.run([SBV2_PY, "-c", f"import {mod}"], capture_output=True).returncode != 0]
+    # pyannote.audio（スタイル特徴の抽出）は torchaudio.AudioMetaData を使うが、torchaudio 2.9 で削除された。
+    # requirements-colab.txt は torch の版を固定していないので、使える 2.8 系にそろえる（torchvision も対応版に）
+    if subprocess.run([SBV2_PY, "-c", "import torchaudio; torchaudio.AudioMetaData"], capture_output=True).returncode != 0:
+        missing += ["torch==2.8.*", "torchaudio==2.8.*", "torchvision==0.23.*"]
     if missing:
-        _log(f"不足している部品を追加中（{', '.join(missing)}）...")
+        _log(f"不足・不適合の部品を入れ直し中（{', '.join(missing)}）...")
         os.environ["PATH"] = "/root/.local/bin:/root/.cargo/bin:" + os.environ["PATH"]
         _run(["uv", "pip", "install", "-q", "--python", SBV2_PY] + missing)
 
