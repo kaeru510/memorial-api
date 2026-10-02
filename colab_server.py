@@ -13,6 +13,45 @@ print("=" * 60)
 print("🚀 Wav2Lip + LivePortrait 高速アバターサーバー 起動シーケンス開始")
 print("=" * 60)
 
+# ==============================================================================
+# 0. 前回の実行の残骸を片付ける
+#    セルを停止しても python / AivisSpeech / ngrok の子プロセスが残ることがあり、
+#    残っているとポート 7860 / 10101 が使用中で起動に失敗し、GPU メモリも占有される
+# ==============================================================================
+def cleanup_previous_run():
+    import signal
+    me = os.getpid()
+    ancestors = set()
+    pid = me
+    while pid > 1:  # 自分と親（ノートブックのシェル）は対象外
+        ancestors.add(pid)
+        try:
+            with open(f"/proc/{pid}/stat") as f:
+                pid = int(f.read().rsplit(")", 1)[1].split()[1])
+        except Exception:
+            break
+    targets = ("colab_server.py", "run.py --use_gpu", "ngrok http", "cloudflared tunnel")
+    killed = []
+    for entry in os.listdir("/proc"):
+        if not entry.isdigit() or int(entry) in ancestors:
+            continue
+        try:
+            with open(f"/proc/{entry}/cmdline", "rb") as f:
+                cmd = f.read().replace(b"\0", b" ").decode(errors="ignore")
+        except Exception:
+            continue
+        if any(t in cmd for t in targets):
+            try:
+                os.kill(int(entry), signal.SIGKILL)
+                killed.append(cmd.strip()[:60])
+            except Exception:
+                pass
+    if killed:
+        print(f"🧹 前回の実行の残りを停止しました ({len(killed)} 件)", flush=True)
+        time.sleep(2)  # ポートと GPU メモリの解放待ち
+
+cleanup_previous_run()
+
 WAV2LIP_DIR = "/content/Wav2Lip"
 LIVEPORTRAIT_DIR = "/content/LivePortrait"
 DRIVE_DIR = "/content/drive/MyDrive/lipsync_avatar"
