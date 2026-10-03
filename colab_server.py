@@ -792,11 +792,13 @@ def aivis_setup_worker():
         aivis_state["ready"] = False
         step(f"起動失敗（ローカルのCPU合成を使います）: {e}")
 
-def aivis_synthesize(text, speaker, speed=1.22, pre=None, post=None):
+def aivis_synthesize(text, speaker, speed=1.22, pre=None, post=None, intonation=None):
     q = requests.post(f"{AIVIS_LOCAL_URL}/audio_query", params={"text": text, "speaker": speaker}, timeout=10)
     q.raise_for_status()
     query = q.json()
     query["speedScale"] = speed
+    if intonation is not None:
+        query["intonationScale"] = intonation  # 感情表現の強さ（1.0→重み1、2.0→重み10）
     if pre is not None:
         query["prePhonemeLength"] = pre
     if post is not None:
@@ -851,6 +853,7 @@ def api_generate_from_text(
     text: str = Form(...),
     speaker: int = Form(AIVIS_WARM_SPEAKER),
     speed: float = Form(1.22),
+    intonation: float = Form(1.0),
     pre_silence: float = Form(0.05),
     post_silence: float = Form(0.05),
     start_frame: int = Form(0),
@@ -869,7 +872,7 @@ def api_generate_from_text(
     temp_wav = f"/content/req_{turn_id or 'x'}_{seg_index}_{int(time.time() * 1000)}.wav"
 
     def synth_to_file():
-        wav_bytes = aivis_synthesize(text, speaker, speed, pre_silence, post_silence)
+        wav_bytes = aivis_synthesize(text, speaker, speed, pre_silence, post_silence, intonation)
         with open(temp_wav, "wb") as f:
             f.write(wav_bytes)
         with _wave.open(temp_wav) as w:

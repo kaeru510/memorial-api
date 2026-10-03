@@ -217,7 +217,7 @@ def get_gradio_client():
 # ====================================================
 # AivisSpeech 音声合成（起動直後でエンジン未準備なら最大30秒待つ）
 # ====================================================
-def synthesize_speech(text, wait_sec=30, pre_silence=None, post_silence=None, speaker=SPEAKER_ID):
+def synthesize_speech(text, wait_sec=30, pre_silence=None, post_silence=None, speaker=SPEAKER_ID, intonation=None):
     """pre_silence / post_silence: 音声前後の無音（秒）。区間分割時はつなぎ目の間を詰めるため短くする"""
     deadline = time.time() + wait_sec
     while True:
@@ -237,6 +237,8 @@ def synthesize_speech(text, wait_sec=30, pre_silence=None, post_silence=None, sp
 
     # ★ 話速を 1.22倍 に設定（自然な早口で動画総フレーム数を大幅削減）
     query_data["speedScale"] = 1.22
+    if intonation is not None:
+        query_data["intonationScale"] = intonation  # AivisSpeech では感情表現の強さ（1.0→重み1、2.0→重み10）
     if pre_silence is not None:
         query_data["prePhonemeLength"] = pre_silence
     if post_silence is not None:
@@ -538,6 +540,7 @@ def render_segment_remote(index, text, clock, emotion="normal"):
         res = requests.post(
             f"{fetch_latest_colab_url()}/api/generate_from_text",
             data={"text": text, "speaker": str(EMOTION_STYLE_IDS[emotion]), "emotion": emotion, "speed": "1.22",
+                  "intonation": str(current_style_strength),
                   "pre_silence": str(SEG_SILENCE), "post_silence": str(SEG_SILENCE),
                   "start_frame": str(start_frame), "turn_id": clock["turn_id"], "seg_index": str(index),
                   "ramp_in": str(ramp_for(index, emotion))},
@@ -552,7 +555,8 @@ def render_segment_remote(index, text, clock, emotion="normal"):
         return res.content
     except Exception as e:
         print(f"ℹ️ Colab GPU 合成に失敗、ローカル合成へ切り替え: {e}")
-        wav_future = tts_executor.submit(synthesize_speech, text, 30, SEG_SILENCE, SEG_SILENCE, EMOTION_STYLE_IDS[emotion])
+        wav_future = tts_executor.submit(synthesize_speech, text, 30, SEG_SILENCE, SEG_SILENCE, EMOTION_STYLE_IDS[emotion],
+                                         current_style_strength)
         return render_segment(index, wav_future, clock, emotion)
 
 @app.post("/chat_stream")
@@ -579,7 +583,8 @@ def chat_stream(req: ChatStreamRequest):
                     executor = remote_executor if colab_turn_support else video_executor
                     video_future = executor.submit(render_segment_remote, i, seg, clock, emotion)
                 else:
-                    wav_future = tts_executor.submit(synthesize_speech, seg, 30, SEG_SILENCE, SEG_SILENCE, EMOTION_STYLE_IDS[emotion])
+                    wav_future = tts_executor.submit(synthesize_speech, seg, 30, SEG_SILENCE, SEG_SILENCE, EMOTION_STYLE_IDS[emotion],
+                                                     current_style_strength)
                     video_future = video_executor.submit(render_segment, i, wav_future, clock, emotion)
                 jobs.append((emotion, seg, video_future))
 
@@ -785,6 +790,11 @@ def setup_emotions():
 MAO_STYLE_IDS = dict(EMOTION_STYLE_IDS)
 VOICE_SETTING_FILE = os.path.join(BASE_DIR, "voice_setting.json")
 current_voice = "mao"
+# 感情表現の強さ（intonationScale）。まおは標準で十分差が出るが、少量の録音で学習した声は
+# 標準（重み1）だと感情の差が合成の揺れに埋もれるため最大（2.0 = 重み10）にする（2026-10-03 聞き比べで確認）
+MAO_STYLE_STRENGTH = 1.0
+CUSTOM_STYLE_STRENGTH = 2.0
+current_style_strength = MAO_STYLE_STRENGTH
 
 def colab_voice_models():
     try:
@@ -806,7 +816,7 @@ def install_voice_locally(model_name):
         print(f"ℹ️ ローカル音声エンジンへの登録をスキップ（予備用のため会話には影響なし）: {e}")
 
 def select_voice(voice):
-    global current_voice
+    global current_voice, current_style_strength
     if voice == "mao":
         EMOTION_STYLE_IDS.update(MAO_STYLE_IDS)
     else:
@@ -818,6 +828,7 @@ def select_voice(voice):
         EMOTION_STYLE_IDS.update({emo: styles.get(emo, fallback) for emo in MAO_STYLE_IDS})
         threading.Thread(target=install_voice_locally, args=(voice,), daemon=True).start()
     current_voice = voice
+    current_style_strength = MAO_STYLE_STRENGTH if voice == "mao" else CUSTOM_STYLE_STRENGTH
     try:
         json.dump({"voice": voice}, open(VOICE_SETTING_FILE, "w", encoding="utf-8"))
     except Exception:
