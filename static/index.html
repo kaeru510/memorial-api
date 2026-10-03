@@ -230,6 +230,12 @@
   <div class="control-panel">
     <div id="subtitle" class="chat-bubble">「話しかけてみてください（マイクまたは入力）」</div>
     
+    <div class="colab-status-row">
+      <span>🧑 話している人:
+        <select id="speakerSelect" class="colab-edit-btn" onchange="saveSpeaker(this.value)"></select>
+      </span>
+      <a href="/static/persona.html" class="colab-edit-btn" style="text-decoration:none">⚙️ 人格・家族の設定</a>
+    </div>
     <div class="input-row">
       <button id="micBtn" class="icon-btn mic-btn" title="マイクで話す" onclick="toggleRecognition()">🎤</button>
       <textarea id="textInput" placeholder="メッセージを入力またはマイクで発話..."></textarea>
@@ -522,7 +528,8 @@
       const response = await fetch("/chat_stream", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ message: text, idle_time: idleVideo.currentTime || 0 })
+        body: JSON.stringify({ message: text, idle_time: idleVideo.currentTime || 0,
+                               speaker_id: document.getElementById("speakerSelect").value || "guest" })
       });
 
       if (!response.ok) {
@@ -614,6 +621,23 @@
   }
 
   // Colab URL の自動監視と手動変更
+  // 話している人（家族ごとに会話を覚える）。選択はこのブラウザに記憶
+  async function loadSpeakers() {
+    try {
+      const people = await (await fetch("/api/people")).json();
+      const sel = document.getElementById("speakerSelect");
+      sel.innerHTML = '<option value="guest">ゲスト（記憶しない）</option>' +
+        Object.entries(people).map(([id, p]) => `<option value="${id}">${p.name}${p.relation ? "（" + p.relation + "）" : ""}</option>`).join("");
+      let saved = "guest";
+      try { saved = localStorage.getItem("speakerId") || "guest"; } catch (e) {}
+      sel.value = people[saved] ? saved : "guest";
+    } catch (e) {}
+  }
+  function saveSpeaker(id) {
+    try { localStorage.setItem("speakerId", id); } catch (e) {}
+  }
+  loadSpeakers();
+
   // 声の切り替え（まお ⇔ 学習した声）
   async function loadVoices() {
     try {

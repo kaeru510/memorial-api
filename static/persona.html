@@ -1,0 +1,168 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>人格と家族の設定</title>
+<style>
+  :root { --bg: #1a1a1e; --card: #26262b; --ink: #eee; --sub: #9a9aa3; --line: #3a3a42; --accent: #2979ff; --field: #1e1e24; }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); color: var(--ink); font-family: -apple-system, "Segoe UI", "Hiragino Sans", "Yu Gothic UI", sans-serif; padding: 24px 16px 60px; }
+  .wrap { max-width: 760px; margin: 0 auto; }
+  h1 { font-size: 22px; margin: 0 0 4px; }
+  h2 { font-size: 18px; margin: 32px 0 8px; }
+  p.lead { color: var(--sub); margin: 4px 0 16px; line-height: 1.7; font-size: 14px; }
+  a { color: #8ab4ff; }
+  .card { background: var(--card); border: 1px solid var(--line); border-radius: 12px; padding: 16px; margin: 12px 0; }
+  label { display: block; font-size: 14px; font-weight: 600; margin: 14px 0 6px; }
+  input, textarea { width: 100%; background: var(--field); color: var(--ink); border: 1px solid #444; border-radius: 8px; padding: 10px 12px; font-size: 14px; font-family: inherit; }
+  textarea { min-height: 64px; resize: vertical; }
+  input:focus, textarea:focus { outline: none; border-color: var(--accent); }
+  button { background: var(--accent); color: #fff; border: 0; border-radius: 8px; padding: 10px 16px; font-size: 14px; font-weight: 600; cursor: pointer; }
+  button.ghost { background: transparent; border: 1px solid var(--line); color: var(--ink); }
+  button.danger { background: transparent; border: 1px solid #a33; color: #ff8a8a; }
+  button:disabled { opacity: .5; cursor: wait; }
+  .row { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; margin-top: 14px; }
+  .status { color: var(--sub); font-size: 13px; }
+  .grid { display: grid; grid-template-columns: 1fr 1fr; gap: 0 12px; }
+  @media (max-width: 560px) { .grid { grid-template-columns: 1fr; } }
+  .person { border-top: 1px solid var(--line); padding: 12px 0; }
+  .person:first-child { border-top: 0; }
+  .person h3 { margin: 0 0 4px; font-size: 16px; }
+  .meta { color: var(--sub); font-size: 13px; }
+  .facts { margin: 8px 0 0; padding-left: 18px; font-size: 13px; line-height: 1.7; }
+  details summary { cursor: pointer; color: var(--sub); font-size: 13px; margin-top: 6px; }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <p><a href="/">← アバターに戻る</a></p>
+  <h1>人格と家族の設定</h1>
+  <p class="lead">アバターが誰として話すか（人格）と、誰と話すか（家族）を設定します。ここで入力した内容はこのパソコンの中だけに保存され、外部には公開されません。</p>
+
+  <h2>1. 人格（アバターが誰として話すか）</h2>
+  <p class="lead">分かる範囲で答えてください。空欄があっても大丈夫です。保存すると、回答から話し方の設定が自動で作られます。</p>
+  <div class="card" id="questions"></div>
+  <div class="row">
+    <button id="savePersona" onclick="savePersona()">回答を保存して人格を作る</button>
+    <span class="status" id="personaStatus"></span>
+  </div>
+  <div class="card">
+    <label for="personaPrompt">作られた人物設定（必要なら直接直して保存できます）</label>
+    <textarea id="personaPrompt" style="min-height:220px" placeholder="まだ作られていません"></textarea>
+    <div class="row">
+      <button class="ghost" onclick="savePromptOnly()">この設定のまま保存</button>
+    </div>
+  </div>
+
+  <h2>2. 家族（アバターに話しかける人）</h2>
+  <p class="lead">家族ごとに会話を覚えます。アバターの画面で、今話している人を選んでから話しかけてください。</p>
+  <div class="card">
+    <input type="hidden" id="pid">
+    <div class="grid">
+      <div><label for="pname">名前</label><input id="pname" placeholder="例: ゆうせい"></div>
+      <div><label for="prelation">続柄（アバターから見て）</label><input id="prelation" placeholder="例: 孫"></div>
+      <div><label for="pcall">アバターからの呼び方</label><input id="pcall" placeholder="例: ゆうちゃん"></div>
+      <div><label for="pnotes">補足（任意）</label><input id="pnotes" placeholder="例: 大学院生。静岡で一人暮らし"></div>
+    </div>
+    <div class="row">
+      <button onclick="savePerson()">家族を登録・更新</button>
+      <button class="ghost" onclick="clearPersonForm()">入力を消す</button>
+    </div>
+  </div>
+  <div class="card" id="people"><span class="status">読み込み中...</span></div>
+</div>
+
+<script>
+  let questions = [];
+  const esc = s => String(s ?? "").replace(/[&<>"]/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]));
+
+  async function loadPersona() {
+    const data = await (await fetch("/api/persona")).json();
+    questions = data.questions;
+    document.getElementById("questions").innerHTML = questions.map(q => `
+      <label for="q_${q.id}">${esc(q.label)}</label>
+      ${q.multiline
+        ? `<textarea id="q_${q.id}" placeholder="${esc(q.placeholder)}">${esc(data.answers?.[q.id])}</textarea>`
+        : `<input id="q_${q.id}" placeholder="${esc(q.placeholder)}" value="${esc(data.answers?.[q.id])}">`}`).join("");
+    document.getElementById("personaPrompt").value = data.prompt || "";
+    if (data.updated) document.getElementById("personaStatus").innerText = `最終更新: ${data.updated}`;
+  }
+
+  function collectAnswers() {
+    const a = {};
+    for (const q of questions) a[q.id] = document.getElementById(`q_${q.id}`).value;
+    return a;
+  }
+
+  async function postPersona(body, label) {
+    const btn = document.getElementById("savePersona");
+    const st = document.getElementById("personaStatus");
+    btn.disabled = true; st.innerText = label;
+    try {
+      const res = await fetch("/api/persona", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) });
+      if (!res.ok) throw new Error((await res.json()).detail || "保存に失敗しました");
+      const data = await res.json();
+      document.getElementById("personaPrompt").value = data.prompt;
+      st.innerText = `保存しました（${data.updated}）。次の会話から反映されます。`;
+    } catch (e) { st.innerText = `エラー: ${e.message}`; }
+    finally { btn.disabled = false; }
+  }
+  const savePersona = () => postPersona({ answers: collectAnswers() }, "人格を作っています（10秒ほど）...");
+  const savePromptOnly = () => postPersona({ answers: collectAnswers(), prompt: document.getElementById("personaPrompt").value }, "保存しています...");
+
+  async function loadPeople() {
+    const people = await (await fetch("/api/people")).json();
+    const box = document.getElementById("people");
+    const ids = Object.keys(people);
+    if (!ids.length) { box.innerHTML = '<span class="status">まだ登録されていません。</span>'; return; }
+    box.innerHTML = ids.map(id => {
+      const p = people[id];
+      const facts = (p.facts || []).map(f => `<li>${esc(f)}</li>`).join("");
+      return `<div class="person">
+        <h3>${esc(p.name)}</h3>
+        <div class="meta">続柄: ${esc(p.relation) || "未設定"} ／ 呼び方: ${esc(p.call_name) || esc(p.name)}${p.notes ? " ／ " + esc(p.notes) : ""}</div>
+        <details><summary>覚えていること（${(p.facts || []).length}件）${p.memory_updated ? "・最終更新 " + esc(p.memory_updated) : ""}</summary>
+          ${facts ? `<ul class="facts">${facts}</ul>` : '<div class="meta" style="margin-top:6px">まだありません（数往復話すと自動で覚えます）</div>'}
+          ${p.summary ? `<div class="meta" style="margin-top:6px">最近の会話: ${esc(p.summary)}</div>` : ""}
+        </details>
+        <div class="row">
+          <button class="ghost" onclick='editPerson(${JSON.stringify(id)})'>編集</button>
+          <button class="danger" onclick='resetMemory(${JSON.stringify(id)}, ${JSON.stringify(p.name)})'>記憶を消す</button>
+          <button class="danger" onclick='deletePerson(${JSON.stringify(id)}, ${JSON.stringify(p.name)})'>削除</button>
+        </div></div>`;
+    }).join("");
+    window._people = people;
+  }
+
+  function editPerson(id) {
+    const p = window._people[id];
+    document.getElementById("pid").value = id;
+    document.getElementById("pname").value = p.name || "";
+    document.getElementById("prelation").value = p.relation || "";
+    document.getElementById("pcall").value = p.call_name || "";
+    document.getElementById("pnotes").value = p.notes || "";
+    window.scrollTo({ top: document.getElementById("pname").getBoundingClientRect().top + scrollY - 120, behavior: "smooth" });
+  }
+  function clearPersonForm() { for (const k of ["pid", "pname", "prelation", "pcall", "pnotes"]) document.getElementById(k).value = ""; }
+
+  async function savePerson() {
+    const v = id => document.getElementById(id).value;
+    const body = { id: v("pid"), name: v("pname").trim(), relation: v("prelation"), call_name: v("pcall"), notes: v("pnotes") };
+    if (!body.name) { alert("名前を入力してください"); return; }
+    await fetch("/api/people", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) });
+    clearPersonForm(); loadPeople();
+  }
+  async function deletePerson(id, name) {
+    if (!confirm(`${name} を削除しますか？（覚えていることも使われなくなります）`)) return;
+    await fetch(`/api/people/${id}`, { method: "DELETE" }); loadPeople();
+  }
+  async function resetMemory(id, name) {
+    if (!confirm(`${name} について覚えていることと会話の記録を消しますか？`)) return;
+    await fetch(`/api/people/${id}/reset_memory`, { method: "POST" }); loadPeople();
+  }
+
+  loadPersona(); loadPeople();
+</script>
+</body>
+</html>

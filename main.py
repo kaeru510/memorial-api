@@ -100,15 +100,15 @@ FINAL_VIDEO_PATH = os.path.join(BASE_DIR, "final_output.mp4")
 # ====================================================
 # 1. Gemini の初期化
 # ====================================================
+# 会話の形式に関するルール（人物の設定は brain.py が前に付け足す）
 SYSTEM_INSTRUCTION = """
-あなたは親しみやすい対話AIアシスタントです。
-以下のルールを必ず守って返答してください：
-1. 友達のように明るく親しみやすい口調で話してください。
+以下の形式のルールを必ず守って返答してください：
+1. 口調・一人称・語尾は、上の人物設定に従ってください（人物設定がなければ明るく親しみやすい口調）。
 2. 会話のテンポを最優先するため、返答全体は20文字〜45文字程度に短くまとめてください。
 3. 返答は必ず、相手の発言に合った短いリアクション（2〜6文字程度）と読点で始め、そのあとに本文を1文続けてください。
    リアクションは内容に合わせて毎回変え、同じ言葉を続けて使わないでください。
    リアクションの例: えー、 / そっか、 / いいね、 / うーん、 / なるほど、 / わあ、 / えっ、 / うんうん、
-4. 文末は「〜だよ」「〜ですね」など、自然に会話を完結させてください。
+4. 文末は、その人物の話し方で自然に会話を完結させてください。
 5. 返答の先頭に必ず感情タグ [normal], [happy], [calm], [sad] のいずれか1つを付与してください。
    声と表情がこの感情になるので、返答の内容と合うものを選んでください。
    ・嬉しい話題・楽しい話・感謝・挨拶: [happy]
@@ -123,15 +123,28 @@ SYSTEM_INSTRUCTION = """
 """
 
 gemini_client = genai.Client(api_key=GEMINI_API_KEY)
+GEMINI_MODEL = "gemini-3.5-flash-lite"
 
-chat_session = gemini_client.chats.create(
-    model="gemini-3.5-flash-lite",
-    config=types.GenerateContentConfig(
-        system_instruction=SYSTEM_INSTRUCTION,
-        temperature=0.7,
-        max_output_tokens=150,
+# 話している相手（家族）ごとの会話セッション。人格や記憶が更新されたら、保存済みの会話履歴から作り直す
+import brain
+_chat_sessions = {}  # person_id -> (brain.version, chat)
+
+def get_chat(person_id):
+    cached = _chat_sessions.get(person_id)
+    if cached and cached[0] == brain.version["n"]:
+        return cached[1]
+    history = [types.Content(role=r, parts=[types.Part(text=t)]) for r, t in brain.recent_history(person_id)]
+    chat = gemini_client.chats.create(
+        model=GEMINI_MODEL,
+        config=types.GenerateContentConfig(
+            system_instruction=brain.build_system_instruction(SYSTEM_INSTRUCTION, person_id),
+            temperature=0.7,
+            max_output_tokens=150,
+        ),
+        history=history,
     )
-)
+    _chat_sessions[person_id] = (brain.version["n"], chat)
+    return chat
 
 print("⚡ AI エンジンをウォームアップ中...")
 try:
@@ -397,7 +410,7 @@ def chat_and_generate_video(req: ChatRequest):
     t0 = time.time()
     emotion = "nod"
     try:
-        response = chat_session.send_message(req.message)
+        response = get_chat(brain.GUEST_ID).send_message(req.message)
         raw_reply = response.text.strip()
         m = re.match(r"^\[(happy|nod|curious|normal|calm|sad)\]\s*(.*)", raw_reply)
         if m:
@@ -462,13 +475,13 @@ EMOTION_TAG = re.compile(r"^\s*\[(happy|nod|curious|normal|calm|sad)\]\s*")
 tts_executor = ThreadPoolExecutor(max_workers=1)
 video_executor = ThreadPoolExecutor(max_workers=1)
 
-def iter_reply_segments(message):
+def iter_reply_segments(message, chat):
     """Gemini のストリームから (emotion, 区間テキスト) を区切りが確定した順に yield"""
     buf = ""
     emotion = None
     first = True
     try:
-        for chunk in chat_session.send_message_stream(message):
+        for chunk in chat.send_message_stream(message):
             buf += chunk.text or ""
             if emotion is None:
                 m = EMOTION_TAG.match(buf)
@@ -514,6 +527,7 @@ def ramp_for(index, emotion):
 class ChatStreamRequest(BaseModel):
     message: str
     idle_time: float = 0.0  # 送信時点の待機動画の再生位置（秒）
+    speaker_id: str = "guest"  # 話している家族（brain/people.json の id）
 
 def wav_duration(wav_bytes):
     with wave.open(io.BytesIO(wav_bytes)) as w:
@@ -613,8 +627,9 @@ def chat_stream(req: ChatStreamRequest):
                  "turn_id": secrets.token_hex(6)}
         jobs = []
         reply_emotion = None  # 1回の返事は1つの感情で統一（声と顔が途中で変わると分かりにくい）
+        person_id = req.speaker_id if req.speaker_id in brain.list_people() else brain.GUEST_ID
         try:
-            for i, (emotion, seg) in enumerate(iter_reply_segments(req.message)):
+            for i, (emotion, seg) in enumerate(iter_reply_segments(req.message, get_chat(person_id))):
                 reply_emotion = reply_emotion or normalize_emotion(emotion)
                 emotion = reply_emotion
                 print(f"🤖 [区間{i + 1} ({emotion})] ({time.time() - total_start:.2f}秒): {seg}")
@@ -639,6 +654,11 @@ def chat_stream(req: ChatStreamRequest):
                     "video": base64.b64encode(mp4).decode("ascii"),
                 }) + "\n"
             yield json.dumps({"type": "done"}) + "\n"
+            # 会話を保存し、数往復ごとに「相手について覚えていること」を更新（返事は待たせない）
+            reply_text = "".join(seg for _, seg, _ in jobs)
+            brain.log_turn(person_id, req.message, f"[{reply_emotion or 'normal'}] {reply_text}")
+            threading.Thread(target=brain.maybe_update_memory, args=(gemini_client, GEMINI_MODEL, person_id),
+                             daemon=True).start()
         except Exception as e:
             traceback.print_exc()
             yield json.dumps({"type": "error", "detail": f"{type(e).__name__}: {e}"}, ensure_ascii=False) + "\n"
@@ -909,6 +929,48 @@ def api_voices():
 def api_voices_select(req: VoiceSelectRequest):
     select_voice(req.voice)
     return {"current": current_voice, "styles": EMOTION_STYLE_IDS}
+
+
+# ====================================================
+# 脳（人格・家族・記憶）の設定 API（画面: /static/persona.html）
+# ====================================================
+class PersonaRequest(BaseModel):
+    answers: dict
+    prompt: str = ""   # 人物設定を手で直した場合はこれをそのまま使う（空なら回答から作り直す）
+
+class PersonRequest(BaseModel):
+    id: str = ""
+    name: str
+    relation: str = ""
+    call_name: str = ""
+    notes: str = ""
+
+@app.get("/api/persona")
+def api_get_persona():
+    return {"questions": brain.PERSONA_QUESTIONS, **brain.get_persona()}
+
+@app.post("/api/persona")
+def api_set_persona(req: PersonaRequest):
+    return brain.save_persona(gemini_client, GEMINI_MODEL, req.answers, req.prompt or None)
+
+@app.get("/api/people")
+def api_people():
+    return brain.list_people()
+
+@app.post("/api/people")
+def api_upsert_person(req: PersonRequest):
+    pid, person = brain.upsert_person(req.model_dump())
+    return {"id": pid, **person}
+
+@app.delete("/api/people/{pid}")
+def api_delete_person(pid: str):
+    brain.delete_person(pid)
+    return {"status": "deleted"}
+
+@app.post("/api/people/{pid}/reset_memory")
+def api_reset_memory(pid: str):
+    brain.reset_memory(pid)
+    return {"status": "reset"}
 
 
 # ====================================================
