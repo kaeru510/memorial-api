@@ -538,13 +538,15 @@ def encode_frames_to_mp4(frames, out_path, audio_path=None):
         ffmpeg_cmd += ["-i", audio_path]
     ffmpeg_cmd += [
         "-c:v", "libx264",
-        "-preset", "ultrafast",
+        # Cloudflare の無料トンネルは受信が遅い（秒速30〜40KB程度）ため、動画を軽くして受け取り時間を縮める。
+        # veryfast + crf30 + 音声48kbpsモノラルで従来比 約35%小さく、画質の差はほぼ分からない（2026-10-03 計測）
+        "-preset", "veryfast",
         "-tune", "zerolatency",
-        "-crf", "28",
+        "-crf", "30",
         "-pix_fmt", "yuv420p",
     ]
     if audio_path:
-        ffmpeg_cmd += ["-c:a", "aac", "-b:a", "96k", "-map", "0:v:0", "-map", "1:a:0", "-shortest"]
+        ffmpeg_cmd += ["-c:a", "aac", "-b:a", "48k", "-ac", "1", "-map", "0:v:0", "-map", "1:a:0", "-shortest"]
     ffmpeg_cmd.append(out_path)
 
     proc = subprocess.Popen(ffmpeg_cmd, stdin=subprocess.PIPE, stderr=subprocess.DEVNULL)
