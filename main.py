@@ -806,6 +806,12 @@ def colab_voice_models():
 def install_voice_locally(model_name):
     """ローカルの AivisSpeech にも学習した声を入れる（Colab の GPU 合成が使えないときの予備用）"""
     try:
+        # すでに入っていればダウンロードしない（モデルは約250MB。毎回落とすとトンネルの通信量を使い切る）
+        uuid = colab_voice_models().get(model_name, {}).get("uuid")
+        local_models = requests.get(f"{AIVIS_URL}/aivm_models", timeout=30).json()
+        if uuid and uuid in local_models:
+            print(f"🎙️ ローカル音声エンジンには {model_name} が登録済み（ダウンロード省略）")
+            return
         r = requests.get(f"{fetch_latest_colab_url()}/api/voice/aivmx", params={"model_name": model_name},
                          headers=TUNNEL_HEADERS, timeout=120)
         r.raise_for_status()
