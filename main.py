@@ -61,6 +61,11 @@ if not GEMINI_API_KEY:
 # 3. Colab サーバーの URL
 #    .env に COLAB_FIXED_URL（ngrok の固定ドメイン）があれば常にそれを使い、クラウド同期は行わない
 COLAB_FIXED_URL = os.environ.get("COLAB_FIXED_URL", "").strip().rstrip("/")
+#    .env に NTFY_TOPIC があれば、Colab が Cloudflare トンネルの URL を投稿する ntfy のチャンネルから最新 URL を受け取る
+#    （ngrok 無料枠の通信量上限に達したため 2026-10-03 から Cloudflare に移行。こちらが優先）
+NTFY_TOPIC = os.environ.get("NTFY_TOPIC", "").strip()
+if NTFY_TOPIC:
+    COLAB_FIXED_URL = ""
 COLAB_GRADIO_URL = COLAB_FIXED_URL or "https://7e42be673fb0f0c312.gradio.live"
 gradio_client = None
 # ngrok 無料プランの警告ページを飛ばすヘッダー（ngrok 以外では無視される）
@@ -144,9 +149,44 @@ SYNC_ENDPOINTS = [
 ]
 CACHE_URL_FILE = os.path.join(BASE_DIR, "colab_url.txt")
 
+_ntfy_cache = {"url": None, "checked": 0.0}
+
+def fetch_url_from_ntfy():
+    """ntfy のチャンネルから、Colab が最後に投稿したトンネル URL を取得（20秒キャッシュ）"""
+    if _ntfy_cache["url"] and time.time() - _ntfy_cache["checked"] < 20:
+        return _ntfy_cache["url"]
+    try:
+        r = requests.get(f"https://ntfy.sh/{NTFY_TOPIC}/json", params={"poll": "1", "since": "12h"}, timeout=5)
+        urls = []
+        for line in r.text.splitlines():
+            try:
+                msg = json.loads(line)
+            except Exception:
+                continue
+            text = (msg.get("message") or "").strip()
+            if msg.get("event") == "message" and text.startswith("https://"):
+                urls.append(text)
+        if urls:
+            _ntfy_cache["url"] = urls[-1]
+        _ntfy_cache["checked"] = time.time()
+    except Exception as e:
+        print(f"ℹ️ ntfy から URL を取得できませんでした: {e}")
+    return _ntfy_cache["url"]
+
 def fetch_latest_colab_url():
     """クラウド同期エンドポイントまたはローカルキャッシュから最新のColab URLを取得"""
     global COLAB_GRADIO_URL, gradio_client
+    if NTFY_TOPIC:
+        url = fetch_url_from_ntfy()
+        if url and url != COLAB_GRADIO_URL:
+            print(f"🔄 Colab の最新 URL を受け取りました: {url}")
+            COLAB_GRADIO_URL = url
+            gradio_client = None
+            try:
+                open(CACHE_URL_FILE, "w", encoding="utf-8").write(url)
+            except Exception:
+                pass
+        return COLAB_GRADIO_URL
     if COLAB_FIXED_URL:
         return COLAB_GRADIO_URL  # 固定URL運用（画面の鉛筆から一時的に変えた場合はその値）
     for ep in SYNC_ENDPOINTS:

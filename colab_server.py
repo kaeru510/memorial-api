@@ -1084,8 +1084,20 @@ import subprocess
 import re
 import requests
 
-def cloudflare_tunnel_worker():
-    print("📡 Cloudflare 高速トンネル (日本国内エッジ) をセットアップ中...", flush=True)
+def publish_url_to_ntfy(url, topic):
+    """トンネルの URL を ntfy の合言葉付きチャンネルに投稿（ローカルの main.py がここから最新 URL を受け取る）"""
+    try:
+        r = requests.post(f"https://ntfy.sh/{topic}", data=url.encode("utf-8"), timeout=10,
+                          headers={"Title": "memorial-api colab url", "Cache": "yes"})
+        return r.ok
+    except Exception as e:
+        print(f"⚠️ URL の投稿に失敗: {e}", flush=True)
+        return False
+
+
+def cloudflare_tunnel_worker(ntfy_topic=None):
+    """Cloudflare のクイックトンネル（無料・通信量上限なし）。URL は起動ごとに変わるので ntfy で受け渡す"""
+    print("📡 Cloudflare トンネルをセットアップ中...", flush=True)
     cf_bin = "/usr/local/bin/cloudflared"
     if not os.path.exists(cf_bin):
         try:
@@ -1097,29 +1109,31 @@ def cloudflare_tunnel_worker():
 
     try:
         proc = subprocess.Popen(
-            [cf_bin, "tunnel", "--url", "http://127.0.0.1:7860"],
+            [cf_bin, "tunnel", "--no-autoupdate", "--url", "http://127.0.0.1:7860"],
             stdout=subprocess.PIPE,
             stderr=subprocess.STDOUT,
             text=True
         )
+        cf_url = None
+        # 出力は最後まで読み続ける（読まずに放置すると出力がたまり cloudflared が止まる）
         for line in proc.stdout:
-            if "trycloudflare.com" in line:
+            if cf_url is None and "trycloudflare.com" in line:
                 m = re.search(r"https://[a-zA-Z0-9-]+\.trycloudflare\.com", line)
                 if m:
                     cf_url = m.group(0)
                     print("\n" + "=" * 60)
-                    print(f"⚡ 【Cloudflare 高速トンネル起動完了】: {cf_url}")
-                    print("（超低遅延な日本国内エッジサーバー経由で高速通信します）")
+                    print(f"⚡ 【Cloudflare トンネル起動完了】: {cf_url}")
+                    if ntfy_topic:
+                        ok = publish_url_to_ntfy(cf_url, ntfy_topic)
+                        print("（URL をパソコン側へ自動で受け渡しました）" if ok else "⚠️ URL の受け渡しに失敗しました")
+
+                        def republish():
+                            # ntfy のメッセージは最大12時間保存されるため、長時間起動に備えて定期的に投稿し直す
+                            while proc.poll() is None:
+                                time.sleep(3 * 3600)
+                                publish_url_to_ntfy(cf_url, ntfy_topic)
+                        threading.Thread(target=republish, daemon=True).start()
                     print("=" * 60 + "\n", flush=True)
-                    sync_endpoints = [
-                        "https://api.cl1p.net/kaeru510-memorial"
-                    ]
-                    for ep in sync_endpoints:
-                        try:
-                            requests.post(ep, data=cf_url.strip(), timeout=5)
-                        except Exception:
-                            pass
-                    break
     except Exception as e:
         print(f"⚠️ Cloudflare 起動スキップ: {e}")
 
@@ -1161,10 +1175,18 @@ def ngrok_tunnel_worker(authtoken, domain):
 # ノートブック側で NGROK_AUTHTOKEN / NGROK_DOMAIN が設定されていれば固定URLの ngrok、なければ従来の Cloudflare
 NGROK_AUTHTOKEN = os.environ.get("NGROK_AUTHTOKEN", "").strip()
 NGROK_DOMAIN = os.environ.get("NGROK_DOMAIN", "").strip().removeprefix("https://").rstrip("/")
-if NGROK_AUTHTOKEN and NGROK_DOMAIN:
+# トンネルの種類: 既定は Cloudflare（無料・通信量上限なし）。ngrok の無料枠は月の通信量に上限があり、
+# 2026-10-03 に使い切ったため。TUNNEL_MODE=ngrok で従来の固定ドメインに戻せる
+TUNNEL_MODE = os.environ.get("TUNNEL_MODE", "cloudflare").strip().lower()
+# URL を受け渡す ntfy の合言葉。指定がなければ ngrok の合鍵から作る（ノートブックの変更不要・推測されにくい）
+import hashlib
+NTFY_TOPIC = os.environ.get("NTFY_TOPIC", "").strip() or (
+    "memorial-" + hashlib.sha256(NGROK_AUTHTOKEN.encode()).hexdigest()[:24] if NGROK_AUTHTOKEN else "")
+USE_MOUNTED_APP = (TUNNEL_MODE == "ngrok" and NGROK_AUTHTOKEN and NGROK_DOMAIN) or bool(NTFY_TOPIC)
+if TUNNEL_MODE == "ngrok" and NGROK_AUTHTOKEN and NGROK_DOMAIN:
     threading.Thread(target=ngrok_tunnel_worker, args=(NGROK_AUTHTOKEN, NGROK_DOMAIN), daemon=True).start()
 else:
-    threading.Thread(target=cloudflare_tunnel_worker, daemon=True).start()
+    threading.Thread(target=cloudflare_tunnel_worker, args=(NTFY_TOPIC or None,), daemon=True).start()
 
 def sync_url_worker():
     sync_endpoints = [
@@ -1192,8 +1214,8 @@ def sync_url_worker():
 if os.environ.get("AIVIS_ON_COLAB", "1") == "1":
     threading.Thread(target=aivis_setup_worker, daemon=True).start()
 
-if NGROK_AUTHTOKEN and NGROK_DOMAIN:
-    # 固定URL運用: ダイレクトAPI(/api/*) と Gradio(/) を同じポート 7860 で提供（gradio.live 共有リンクは不要）
+if USE_MOUNTED_APP:
+    # 固定URL / URL受け渡しあり の運用: ダイレクトAPI(/api/*) と Gradio(/) を同じポート 7860 で提供（gradio.live 共有リンクは不要）
     import uvicorn
     app = gr.mount_gradio_app(api_app, demo, path="/", allowed_paths=["/content"], show_error=True)
     uvicorn.run(app, host="127.0.0.1", port=7860, log_level="warning")
